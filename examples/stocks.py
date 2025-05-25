@@ -131,7 +131,7 @@ try:
     draw.text((2 * col_width + 5, ratios_y_start), f"ORCL/VTI: {orcl_to_vti}", font=font_ratios, fill=0)
 
     # Footer: Time + Battery
-    timestamp = datetime.now().strftime("%b %d %I:%M %p")
+    timestamp = datetime.now().strftime("%b %d %I:%M:%S %p")
     battery_percent = get_battery_percentage()
     footer_text = f"{timestamp} | {battery_percent}%"
     footer_text_width, _ = draw.textsize(footer_text, font=font_footer)
@@ -167,10 +167,6 @@ finally:
     logging.info(f"RTC alarm response: {response}")
 
     if now.hour == MORNING_HOUR or now.hour == EVENING_HOUR:
-        # --- Shutdown Countdown ---
-        logging.info("Waiting 1 minute before shutdown...")
-        time.sleep(60)
-
         logging.info("Shutting down system.")
         os.system("sudo /sbin/shutdown -h now")
     else:
