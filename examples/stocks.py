@@ -16,7 +16,8 @@ Displays:
 
 import os
 import time
-from datetime import datetime, timedelta
+import json
+from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from lib.waveshare_epd import epd2in13_V4
 import yfinance as yf
@@ -38,8 +39,18 @@ font_ratios = ImageFont.truetype(font_path, 10)
 
 # Tickers
 tickers = ['VTI', 'GLD', 'PSTG', 'ORCL']
+btc_symbol = 'BTC-USD'
+cache_file = '/home/chinmay/stock_cache.json'
+
+# Load old cache
+if os.path.exists(cache_file):
+    with open(cache_file, 'r') as f:
+        last_values = json.load(f)
+else:
+    last_values = {}
+
+btc_ticker = yf.Ticker(btc_symbol)
 ticker_objs = {t: yf.Ticker(t) for t in tickers}
-btc_ticker = yf.Ticker("BTC-USD")
 
 MORNING_HOUR = 7
 EVENING_HOUR = 19
@@ -69,36 +80,57 @@ try:
     logging.info("Fetching ticker data...")
     MAX_RETRIES = 5
     quotes = {}
-    retried = False
+    used_fallback = False
 
     for t in tickers:
+        success = False
         for attempt in range(MAX_RETRIES):
             try:
                 data = ticker_objs[t].history(period="1d", interval="1m")
                 if not data.empty:
                     latest = data.tail(1)
                     quotes[t] = f"{latest['Close'][0]:.2f}"
+                    success = True
                     break
             except Exception as e:
                 logging.warning(f"Retry {attempt + 1} for ticker {t} failed: {e}")
-            time.sleep(1)
-        else:
-            quotes[t] = "N/A"
-            retried = True
+            time.sleep(2 ** attempt)
+        if not success:
+            quotes[t] = last_values.get(t, "N/A")
+            if quotes[t] != "N/A":
+                used_fallback = True
 
+    # Bitcoin price
+    success = False
     for attempt in range(MAX_RETRIES):
         try:
             btc_data = btc_ticker.history(period="1d", interval="1m")
             if not btc_data.empty:
                 btc_latest = btc_data.tail(1)
                 btc_price = f"{btc_latest['Close'][0]:.0f}"
+                success = True
                 break
         except Exception as e:
             logging.warning(f"Retry {attempt + 1} for BTC-USD failed: {e}")
-        time.sleep(1)
-    else:
-        btc_price = "N/A"
-        retried = True
+        time.sleep(2 ** attempt)
+    if not success:
+        btc_price = last_values.get(btc_symbol, "N/A")
+        if btc_price != "N/A":
+            used_fallback = True
+
+    # Save cache only for valid values
+    try:
+        cache_to_save = {}
+        for t in tickers:
+            if quotes[t] != "N/A":
+                cache_to_save[t] = quotes[t]
+        if btc_price != "N/A":
+            cache_to_save[btc_symbol] = btc_price
+        if cache_to_save:
+            with open(cache_file, 'w') as f:
+                json.dump(cache_to_save, f)
+    except Exception as e:
+        logging.error(f"Failed to save cache: {e}")
 
     # Ratios
     try:
@@ -144,7 +176,7 @@ try:
     # Footer
     timestamp = datetime.now().strftime("%b %d %I:%M:%S %p")
     battery_percent = get_battery_percentage()
-    footer_text = f"{timestamp}{'*' if retried else ''} | {battery_percent}%"
+    footer_text = f"{timestamp}{'*' if used_fallback else ''} | {battery_percent}%"
     footer_text_width, _ = draw.textsize(footer_text, font=font_footer)
     footer_x = (epd.height - footer_text_width) // 2
 
