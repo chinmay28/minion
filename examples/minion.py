@@ -16,7 +16,7 @@ LOG_FILE = "/home/chinmay/minion.log"
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger()
 
@@ -37,18 +37,29 @@ INITIAL_BACKOFF = 5
 MAX_WORKERS = 10
 CACHE_FILE = "/home/chinmay/minion_cache.json"
 PRIVATE_DATA_DIR = "/home/chinmay/minion/examples/private_data"
-WEATHER_API_KEY = "foo"
 HOME_LAT_LONG = (37.18, -121.89)
 WEATHER_BASE_URL = "https://api.openweathermap.org/data/3.0/onecall"
 
+# --- Load Weather API Key ---
+try:
+    with open("/home/chinmay/weather_api.txt", "r") as f:
+        WEATHER_API_KEY = f.read().strip()
+except Exception as e:
+    logger.error(f"Failed to read weather API key: {e}")
+    WEATHER_API_KEY = ""
+
 terminate = False
 
+
 def handle_sigint(signum, frame):
+    """Gracefully handle Ctrl+C"""
     global terminate
     logger.warning("Interrupted by user. Exiting gracefully...")
     terminate = True
 
+
 signal.signal(signal.SIGINT, handle_sigint)
+
 
 # --- Utility Functions ---
 def get_battery_percentage():
@@ -62,9 +73,11 @@ def get_battery_percentage():
         logger.error(f"Failed to get battery: {e}")
         return "N/A"
 
+
 def is_am(now=None):
     now = now or datetime.now()
     return 0 <= now.hour < 12
+
 
 def fetch_funded_sum(address):
     url = f"{API_BASE}/{address}"
@@ -90,11 +103,13 @@ def fetch_funded_sum(address):
             backoff *= 2
     return 0
 
+
 def calculate_grand_total():
     input_files = [
         os.path.join(PRIVATE_DATA_DIR, f)
         for f in os.listdir(PRIVATE_DATA_DIR)
-        if os.path.isfile(os.path.join(PRIVATE_DATA_DIR, f)) and f.lower().endswith(".txt")
+        if os.path.isfile(os.path.join(PRIVATE_DATA_DIR, f))
+        and f.lower().endswith(".txt")
     ]
     grand_total = 0
     for filename in input_files:
@@ -115,18 +130,19 @@ def calculate_grand_total():
         grand_total += subtotal
     return grand_total
 
+
 # --- Main Display Logic ---
 def main():
     epd = epd2in13_V4.EPD()
     epd.init()
     btc_ticker = yf.Ticker("BTC-USD")
-    tickers = ['VTI', 'GLD', 'PSTG', 'ORCL']
+    tickers = ["VTI", "GLD", "PSTG", "ORCL"]
     ticker_objs = {t: yf.Ticker(t) for t in tickers}
 
     # Load cache
     last_values = {}
     if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, 'r') as f:
+        with open(CACHE_FILE, "r") as f:
             last_values = json.load(f)
 
     quotes = {}
@@ -142,49 +158,53 @@ def main():
 
     try:
         btc_data = btc_ticker.history(period="1d", interval="1m")
-        btc_price = f"{btc_data['Close'].iloc[-1]:.0f}" if not btc_data.empty else last_values.get('BTC-USD', "N/A")
+        btc_price = f"{btc_data['Close'].iloc[-1]:.0f}" if not btc_data.empty else last_values.get("BTC-USD", "N/A")
     except:
-        btc_price = last_values.get('BTC-USD', "N/A")
+        btc_price = last_values.get("BTC-USD", "N/A")
         used_fallback = True
 
+    # Save cache
     cache_to_save = {t: quotes[t] for t in tickers if quotes[t] != "N/A"}
     if btc_price != "N/A":
-        cache_to_save['BTC-USD'] = btc_price
-    with open(CACHE_FILE, 'w') as f:
+        cache_to_save["BTC-USD"] = btc_price
+    with open(CACHE_FILE, "w") as f:
         json.dump(cache_to_save, f)
 
     # Ratios
     try:
-        vti_to_gld = round(float(quotes['VTI']) / float(quotes['GLD']), 2)
-        pstg_to_vti = round(float(quotes['PSTG']) / float(quotes['VTI']), 2)
-        orcl_to_vti = round(float(quotes['ORCL']) / float(quotes['VTI']), 2)
+        vti_to_gld = round(float(quotes["VTI"]) / float(quotes["GLD"]), 2)
+        pstg_to_vti = round(float(quotes["PSTG"]) / float(quotes["VTI"]), 2)
+        orcl_to_vti = round(float(quotes["ORCL"]) / float(quotes["VTI"]), 2)
     except:
         vti_to_gld = pstg_to_vti = orcl_to_vti = "N/A"
 
     # Grand total sats
     grand_total_sats = calculate_grand_total()
 
-    # Image
-    image = Image.new('1', (epd.height, epd.width), 255)
+    # --- Draw image ---
+    image = Image.new("1", (epd.height, epd.width), 255)
     draw = ImageDraw.Draw(image)
 
+    # Header
     draw.rectangle((0, 0, epd.height, 22), fill=0)
     draw.text((5, 4), "Minion", font=font_title, fill=255)
     btc_text = f"${btc_price}"
     btc_text_width, _ = draw.textsize(btc_text, font=font_title)
     draw.text((epd.height - btc_text_width - 5, 4), btc_text, font=font_title, fill=255)
 
+    # Stock data
     left_x, right_x = 10, int(epd.height / 2) + 5
     y_start, y_spacing = 28, 20
-
     for i, t in enumerate(tickers[:2]):
         draw.text((left_x, y_start + i * y_spacing), f"{t}: ${quotes[t]}", font=font_main, fill=0)
     for i, t in enumerate(tickers[2:]):
         draw.text((right_x, y_start + i * y_spacing), f"{t}: ${quotes[t]}", font=font_main, fill=0)
 
+    # Divider line
     line_y = y_start + 2 * y_spacing + 10
     draw.line((0, line_y, epd.height, line_y), fill=0)
 
+    # Ratios
     ratios_y = line_y + 5
     col_width = epd.height // 3
     draw.text((10, ratios_y), f"VTI/GLD: {vti_to_gld}", font=font_ratios, fill=0)
@@ -194,9 +214,18 @@ def main():
     # Footer
     timestamp = datetime.now().strftime("%m/%d %H:%M")
     battery_percent = get_battery_percentage()
-    weather_data = requests.get(f"{WEATHER_BASE_URL}?lat={HOME_LAT_LONG[0]}&lon={HOME_LAT_LONG[1]}&units=imperial&exclude=current,minutely,hourly,alerts&appid={WEATHER_API_KEY}")
-    min_temp, max_temp = round(weather_data.json()["daily"][0]["temp"]["min"]), round(weather_data.json()["daily"][0]["temp"]["max"])
-    weather_str = f"{min_temp}-{max_temp}"
+
+    try:
+        weather_data = requests.get(
+            f"{WEATHER_BASE_URL}?lat={HOME_LAT_LONG[0]}&lon={HOME_LAT_LONG[1]}&units=imperial&exclude=current,minutely,hourly,alerts&appid={WEATHER_API_KEY}",
+            timeout=10,
+        )
+        data = weather_data.json()
+        min_temp, max_temp = round(data["daily"][0]["temp"]["min"]), round(data["daily"][0]["temp"]["max"])
+        weather_str = f"{min_temp}-{max_temp}"
+    except Exception as e:
+        logger.error(f"Weather fetch failed: {e}")
+        weather_str = "N/A"
 
     footer_text = f"{timestamp}{'*' if used_fallback else ''} | {grand_total_sats} | {weather_str} | {battery_percent}%"
     footer_text_width, _ = draw.textsize(footer_text, font=font_footer)
@@ -217,6 +246,7 @@ def main():
         os.system("sudo /sbin/shutdown -h now")
     else:
         logger.info("Manual boot suspected; skipping shutdown.")
+
 
 if __name__ == "__main__":
     main()
