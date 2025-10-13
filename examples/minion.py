@@ -5,9 +5,9 @@ import json
 import logging
 import signal
 import requests
+import random
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from lib.waveshare_epd import epd2in13_V4
 import yfinance as yf
 
@@ -30,13 +30,7 @@ font_ratios = ImageFont.truetype(font_path, 10)
 # --- Constants ---
 MORNING_HOUR = 7
 EVENING_HOUR = 19
-API_BASE = "http://pi4:3006/api/address"
-REQUEST_TIMEOUT = 300
-MAX_RETRIES = 5
-INITIAL_BACKOFF = 5
-MAX_WORKERS = 10
 CACHE_FILE = "/home/chinmay/minion_cache.json"
-PRIVATE_DATA_DIR = "/home/chinmay/minion/examples/private_data"
 HOME_LAT_LONG = (37.18, -121.89)
 WEATHER_BASE_URL = "https://api.openweathermap.org/data/3.0/onecall"
 
@@ -77,58 +71,6 @@ def get_battery_percentage():
 def is_am(now=None):
     now = now or datetime.now()
     return 0 <= now.hour < 12
-
-
-def fetch_funded_sum(address):
-    url = f"{API_BASE}/{address}"
-    retries = 0
-    backoff = INITIAL_BACKOFF
-
-    while retries <= MAX_RETRIES and not terminate:
-        try:
-            resp = requests.get(url, timeout=REQUEST_TIMEOUT)
-            if resp.status_code == 504:
-                logger.warning(f"{address}: 504 Gateway Timeout. Retrying in 120 seconds...")
-                time.sleep(120)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            return data["chain_stats"]["funded_txo_sum"]
-        except Exception as e:
-            logger.error(f"{address}: {e}")
-            if retries == MAX_RETRIES:
-                return 0
-            retries += 1
-            time.sleep(backoff)
-            backoff *= 2
-    return 0
-
-
-def calculate_grand_total():
-    input_files = [
-        os.path.join(PRIVATE_DATA_DIR, f)
-        for f in os.listdir(PRIVATE_DATA_DIR)
-        if os.path.isfile(os.path.join(PRIVATE_DATA_DIR, f))
-        and f.lower().endswith(".txt")
-    ]
-    grand_total = 0
-    for filename in input_files:
-        if terminate:
-            break
-        with open(filename, "r") as f:
-            addresses = [line.strip() for line in f if line.strip()]
-        subtotal = 0
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(fetch_funded_sum, addr): addr for addr in addresses}
-            for future in as_completed(futures):
-                if terminate:
-                    break
-                try:
-                    subtotal += future.result()
-                except Exception as e:
-                    logger.error(f"Error processing address: {e}")
-        grand_total += subtotal
-    return grand_total
 
 
 # --- Main Display Logic ---
@@ -178,8 +120,8 @@ def main():
     except:
         vti_to_gld = pstg_to_vti = orcl_to_vti = "N/A"
 
-    # Grand total sats
-    grand_total_sats = calculate_grand_total()
+    # --- Random number instead of grand total ---
+    random_number = random.randint(100000, 999999)
 
     # --- Draw image ---
     image = Image.new("1", (epd.height, epd.width), 255)
@@ -227,7 +169,7 @@ def main():
         logger.error(f"Weather fetch failed: {e}")
         weather_str = "N/A"
 
-    footer_text = f"{timestamp}{'*' if used_fallback else ''} | {grand_total_sats} | {weather_str} | {battery_percent}%"
+    footer_text = f"{timestamp}{'*' if used_fallback else ''} | {random_number} | {weather_str} | {battery_percent}%"
     footer_text_width, _ = draw.textsize(footer_text, font=font_footer)
     footer_x = (epd.height - footer_text_width) // 2
 
