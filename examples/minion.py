@@ -5,7 +5,7 @@ import json
 import logging
 import signal
 import requests
-import random
+import subprocess
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from lib.waveshare_epd import epd2in13_V4
@@ -33,6 +33,7 @@ EVENING_HOUR = 19
 CACHE_FILE = "/home/chinmay/minion_cache.json"
 HOME_LAT_LONG = (37.18, -121.89)
 WEATHER_BASE_URL = "https://api.openweathermap.org/data/3.0/onecall"
+MAGIC_SUM_CMD = "/home/chinmay/magic -mode lookup -dir /home/chinmay/private_data -sum"
 
 # --- Load Weather API Key ---
 try:
@@ -65,6 +66,30 @@ def get_battery_percentage():
         return "N/A"
     except Exception as e:
         logger.error(f"Failed to get battery: {e}")
+        return "N/A"
+
+
+def get_magic_sum():
+    """Run external command to get magic sum."""
+    try:
+        logger.info(f"Running command {MAGIC_SUM_CMD}")
+        result = subprocess.run(
+            MAGIC_SUM_CMD,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120
+        )
+        if result.returncode == 0:
+            value = result.stdout.strip()
+            if value:
+                logger.info(f"Got magic sum: {value}")
+                return value
+        logger.error(f"Magic sum command failed: {result.stderr.strip()}")
+        return "N/A"
+    except Exception as e:
+        logger.error(f"Failed to run magic sum command: {e}")
         return "N/A"
 
 
@@ -120,8 +145,8 @@ def main():
     except:
         vti_to_gld = pstg_to_vti = orcl_to_vti = "N/A"
 
-    # --- Random number instead of grand total ---
-    random_number = random.randint(100000, 999999)
+    # --- Fetch magic sum instead ---
+    magic_sum = get_magic_sum()
 
     # --- Draw image ---
     image = Image.new("1", (epd.height, epd.width), 255)
@@ -169,7 +194,7 @@ def main():
         logger.error(f"Weather fetch failed: {e}")
         weather_str = "N/A"
 
-    footer_text = f"{timestamp}{'*' if used_fallback else ''} | {random_number} | {weather_str} | {battery_percent}%"
+    footer_text = f"{timestamp}{'*' if used_fallback else ''} | {magic_sum} | {weather_str} | {battery_percent}%"
     footer_text_width, _ = draw.textsize(footer_text, font=font_footer)
     footer_x = (epd.height - footer_text_width) // 2
 
