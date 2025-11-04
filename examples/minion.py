@@ -30,18 +30,9 @@ font_ratios = ImageFont.truetype(font_path, 10)
 # --- Constants ---
 MORNING_HOUR = 7
 EVENING_HOUR = 19
+MANUAL_BOOT_HOURS = [20, 21, 22, 23]
 CACHE_FILE = "/home/chinmay/minion_cache.json"
-HOME_LAT_LONG = (37.18, -121.89)
-WEATHER_BASE_URL = "https://api.openweathermap.org/data/3.0/onecall"
 MAGIC_SUM_CMD = "/home/chinmay/magic -mode lookup -dir /home/chinmay/private_data -sum"
-
-# --- Load Weather API Key ---
-try:
-    with open("/home/chinmay/weather_api.txt", "r") as f:
-        WEATHER_API_KEY = f.read().strip()
-except Exception as e:
-    logger.error(f"Failed to read weather API key: {e}")
-    WEATHER_API_KEY = ""
 
 terminate = False
 
@@ -103,7 +94,7 @@ def main():
     epd = epd2in13_V4.EPD()
     epd.init()
     btc_ticker = yf.Ticker("BTC-USD")
-    tickers = ["VTI", "GLD", "PSTG", "ORCL"]
+    tickers = ["VTI", "GLD", "PSTG", "ORCL", "STRC"]
     ticker_objs = {t: yf.Ticker(t) for t in tickers}
 
     # Load cache
@@ -164,7 +155,7 @@ def main():
     y_start, y_spacing = 28, 20
     for i, t in enumerate(tickers[:2]):
         draw.text((left_x, y_start + i * y_spacing), f"{t}: ${quotes[t]}", font=font_main, fill=0)
-    for i, t in enumerate(tickers[2:]):
+    for i, t in enumerate(tickers[2:4]):
         draw.text((right_x, y_start + i * y_spacing), f"{t}: ${quotes[t]}", font=font_main, fill=0)
 
     # Divider line
@@ -182,19 +173,7 @@ def main():
     timestamp = datetime.now().strftime("%m/%d %H:%M")
     battery_percent = get_battery_percentage()
 
-    try:
-        weather_data = requests.get(
-            f"{WEATHER_BASE_URL}?lat={HOME_LAT_LONG[0]}&lon={HOME_LAT_LONG[1]}&units=imperial&exclude=current,minutely,hourly,alerts&appid={WEATHER_API_KEY}",
-            timeout=10,
-        )
-        data = weather_data.json()
-        min_temp, max_temp = round(data["daily"][0]["temp"]["min"]), round(data["daily"][0]["temp"]["max"])
-        weather_str = f"{min_temp}-{max_temp}"
-    except Exception as e:
-        logger.error(f"Weather fetch failed: {e}")
-        weather_str = "N/A"
-
-    footer_text = f"{timestamp}{'*' if used_fallback else ''} | {magic_sum} | {weather_str} | {battery_percent}%"
+    footer_text = f"{timestamp}{'*' if used_fallback else ''} | {magic_sum} | ${quotes['STRC']} | {battery_percent}%"
     footer_text_width, _ = draw.textsize(footer_text, font=font_footer)
     footer_x = (epd.height - footer_text_width) // 2
 
@@ -206,14 +185,13 @@ def main():
 
     now = datetime.now().astimezone()
     wake_hour = EVENING_HOUR if is_am(now) else MORNING_HOUR
-    waketime_str = now.replace(hour=wake_hour, minute=0, second=0, microsecond=0).isoformat()
+    waketime_str = now.replace(hour=wake_hour, minute=50, second=0, microsecond=0).isoformat()
     os.popen(f'echo "rtc_alarm_set {waketime_str} 127" | nc -q 0 127.0.0.1 8423').read()
 
-    if now.hour in [MORNING_HOUR, EVENING_HOUR]:
-        os.system("sudo /sbin/shutdown -h now")
-    else:
+    if now.hour in MANUAL_BOOT_HOURS:
         logger.info("Manual boot suspected; skipping shutdown.")
-
+    else:
+        os.system("sudo /sbin/shutdown -h now")
 
 if __name__ == "__main__":
     main()
