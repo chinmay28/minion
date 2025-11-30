@@ -1,15 +1,14 @@
+#!/usr/bin/python
+
 import os
-import sys
 import time
 import json
 import logging
 import signal
 import requests
-import subprocess
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from lib.waveshare_epd import epd2in13_V4
-import yfinance as yf
 
 # --- Logging setup ---
 LOG_FILE = "/home/chinmay/minion.log"
@@ -28,116 +27,149 @@ font_footer = ImageFont.truetype(font_path, 11)
 font_ratios = ImageFont.truetype(font_path, 10)
 
 # --- Constants ---
-MORNING_HOUR = 7
-EVENING_HOUR = 19
-MANUAL_BOOT_HOURS = [20, 21, 22, 23]
-CACHE_FILE = "/home/chinmay/minion_cache.json"
-MAGIC_SUM_CMD = "/home/chinmay/magic -mode lookup -dir /home/chinmay/private_data -sum"
-
+MORNING_HOUR = 6
+EVENING_HOUR = 18
 terminate = False
 
 
+# --- Signal Handling ---
 def handle_sigint(signum, frame):
-    """Gracefully handle Ctrl+C"""
     global terminate
     logger.warning("Interrupted by user. Exiting gracefully...")
     terminate = True
-
 
 signal.signal(signal.SIGINT, handle_sigint)
 
 
 # --- Utility Functions ---
+def safe_get(d, key, default="N/A"):
+    """Safe dict getter with logging."""
+    if not isinstance(d, dict):
+        logger.error(f"safe_get() received non-dict: {d}")
+        return default
+    value = d.get(key, default)
+    if value == "N/A":
+        logger.warning(f"Missing key: {key}")
+    return value
+
+
 def get_battery_percentage():
     try:
         result = os.popen('echo "get battery" | nc -q 0 127.0.0.1 8423').read().strip()
+        logger.debug(f"Battery raw response: {result}")
         if "battery:" in result:
-            battery_value = result.split(":")[1].strip()
-            return int(float(battery_value))
+            val = result.split(":")[1].strip()
+            pct = int(float(val))
+            logger.debug(f"Battery parsed: {pct}%")
+            return pct
+        logger.warning("Battery response format invalid")
         return "N/A"
     except Exception as e:
-        logger.error(f"Failed to get battery: {e}")
+        logger.exception("Failed to read battery:")
         return "N/A"
+
+
+# --- Robust JSON fetch with retries ---
+def fetch_json(url, retries=10, delay=1):
+    for attempt in range(1, retries + 1):
+        try:
+            logger.debug(f"Requesting {url} (attempt {attempt})")
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            logger.debug(f"Raw JSON from {url}: {response.text}")
+            return response.json()
+        except Exception as e:
+            logger.warning(f"Attempt {attempt} failed for {url}: {e}")
+            time.sleep(delay)
+
+    logger.error(f"All {retries} attempts FAILED for url {url}")
+    return {}  # Always return safe empty dict
 
 
 def get_magic_sum():
-    """Run external command to get magic sum."""
+    data = fetch_json("http://pi4:8000/api/minion-sum")
     try:
-        logger.info(f"Running command {MAGIC_SUM_CMD}")
-        result = subprocess.run(
-            MAGIC_SUM_CMD,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=120
-        )
-        if result.returncode == 0:
-            value = result.stdout.strip()
-            if value:
-                logger.info(f"Got magic sum: {value}")
-                return value
-        logger.error(f"Magic sum command failed: {result.stderr.strip()}")
-        return "N/A"
+        result = data["value"]["sum"]
+        logger.debug(f"Magic sum: {result}")
+        return result
     except Exception as e:
-        logger.error(f"Failed to run magic sum command: {e}")
+        logger.warning(f"Malformed minion-sum response: {data}")
         return "N/A"
+
+
+def get_quotes():
+    data = fetch_json("http://pi4:8000/api/minion-quotes")
+
+    if "value" not in data:
+        logger.error(f"Quotes missing 'value' field: {data}")
+        return {}
+
+    quotes = data["value"]
+
+    # --- FIX: Prevent crash when quotes is not a dict ---
+    if not isinstance(quotes, dict):
+        logger.error(f"'value' returned non-dict quotes: type={type(quotes)} data={quotes}")
+        return {}
+
+    # Remove timestamp safely
+    if "timestamp" in quotes:
+        quotes.pop("timestamp", None)
+
+    logger.debug(f"Final parsed quotes: {quotes}")
+    return quotes
+
+
+def should_auto_shutdown():
+    data = fetch_json("http://pi4:8000/api/minion-auto-shutdown")
+    try:
+        logger.debug(f"Auto shutdown flag: {data['value']}")
+        return data["value"]["enabled"] == 1
+    except Exception as e:
+        logger.warning(f"Malformed auto-shutdown response: {data} or exc: {e}")
+        return False
 
 
 def is_am(now=None):
     now = now or datetime.now()
-    return 0 <= now.hour < 12
+    return now.hour < 12
 
 
-# --- Main Display Logic ---
+# --- Main Program ---
 def main():
-    epd = epd2in13_V4.EPD()
-    epd.init()
-    btc_ticker = yf.Ticker("BTC-USD")
-    tickers = ["VTI", "GLD", "PSTG", "ORCL", "STRC"]
-    ticker_objs = {t: yf.Ticker(t) for t in tickers}
+    logger.info("Starting minion display update...")
 
-    # Load cache
-    last_values = {}
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "r") as f:
-            last_values = json.load(f)
+    # --- Init display ---
+    try:
+        epd = epd2in13_V4.EPD()
+        epd.init()
+    except Exception as e:
+        logger.exception("Display initialization FAILED:")
+        return
 
-    quotes = {}
-    used_fallback = False
+    quotes = get_quotes()
 
-    for t in tickers:
+    # Extract values with safety
+    BTC  = safe_get(quotes, "BTC-USD")
+    VTI  = safe_get(quotes, "VTI")
+    GLD  = safe_get(quotes, "GLD")
+    PSTG = safe_get(quotes, "PSTG")
+    ORCL = safe_get(quotes, "ORCL")
+    STRC = safe_get(quotes, "STRC")
+
+    # Compute ratios
+    def safe_ratio(a, b):
         try:
-            data = ticker_objs[t].history(period="1d", interval="1m")
-            quotes[t] = f"{data['Close'].iloc[-1]:.2f}" if not data.empty else last_values.get(t, "N/A")
-        except:
-            quotes[t] = last_values.get(t, "N/A")
-            used_fallback = True
+            return round(float(a) / float(b), 2)
+        except Exception as e:
+            logger.warning(f"Ratio failed {a}/{b}: {e}")
+            return "N/A"
 
-    try:
-        btc_data = btc_ticker.history(period="1d", interval="1m")
-        btc_price = f"{btc_data['Close'].iloc[-1]:.0f}" if not btc_data.empty else last_values.get("BTC-USD", "N/A")
-    except:
-        btc_price = last_values.get("BTC-USD", "N/A")
-        used_fallback = True
+    vti_to_gld = safe_ratio(VTI, GLD)
+    pstg_to_vti = safe_ratio(PSTG, VTI)
+    orcl_to_vti = safe_ratio(ORCL, VTI)
 
-    # Save cache
-    cache_to_save = {t: quotes[t] for t in tickers if quotes[t] != "N/A"}
-    if btc_price != "N/A":
-        cache_to_save["BTC-USD"] = btc_price
-    with open(CACHE_FILE, "w") as f:
-        json.dump(cache_to_save, f)
-
-    # Ratios
-    try:
-        vti_to_gld = round(float(quotes["VTI"]) / float(quotes["GLD"]), 2)
-        pstg_to_vti = round(float(quotes["PSTG"]) / float(quotes["VTI"]), 2)
-        orcl_to_vti = round(float(quotes["ORCL"]) / float(quotes["VTI"]), 2)
-    except:
-        vti_to_gld = pstg_to_vti = orcl_to_vti = "N/A"
-
-    # --- Fetch magic sum instead ---
     magic_sum = get_magic_sum()
+    battery = get_battery_percentage()
 
     # --- Draw image ---
     image = Image.new("1", (epd.height, epd.width), 255)
@@ -146,52 +178,70 @@ def main():
     # Header
     draw.rectangle((0, 0, epd.height, 22), fill=0)
     draw.text((5, 4), "Minion", font=font_title, fill=255)
-    btc_text = f"${btc_price}"
-    btc_text_width, _ = draw.textsize(btc_text, font=font_title)
-    draw.text((epd.height - btc_text_width - 5, 4), btc_text, font=font_title, fill=255)
 
-    # Stock data
-    left_x, right_x = 10, int(epd.height / 2) + 5
-    y_start, y_spacing = 28, 20
-    for i, t in enumerate(tickers[:2]):
-        draw.text((left_x, y_start + i * y_spacing), f"{t}: ${quotes[t]}", font=font_main, fill=0)
-    for i, t in enumerate(tickers[2:4]):
-        draw.text((right_x, y_start + i * y_spacing), f"{t}: ${quotes[t]}", font=font_main, fill=0)
+    try:
+        btc_text = f"${int(float(BTC)):,}" if BTC != "N/A" else "BTC:N/A"
+    except Exception as e:
+        logger.warning(f"Failed to format BTC '{BTC}': {e}")
+        btc_text = "BTC:N/A"
+    w, _ = draw.textsize(btc_text, font=font_title)
+    draw.text((epd.height - w - 5, 4), btc_text, font=font_title, fill=255)
 
-    # Divider line
-    line_y = y_start + 2 * y_spacing + 10
+    # Stock columns
+    left_x, right_x = 10, epd.height // 2 + 5
+    y0, dy = 28, 20
+    draw.text((left_x,  y0), f"VTI: ${VTI}", font=font_main, fill=0)
+    draw.text((left_x,  y0+dy), f"GLD: ${GLD}", font=font_main, fill=0)
+    draw.text((right_x, y0), f"PSTG: ${PSTG}", font=font_main, fill=0)
+    draw.text((right_x, y0+dy), f"ORCL: ${ORCL}", font=font_main, fill=0)
+
+    # Divider
+    line_y = y0 + 2*dy + 10
     draw.line((0, line_y, epd.height, line_y), fill=0)
 
     # Ratios
-    ratios_y = line_y + 5
-    col_width = epd.height // 3
-    draw.text((10, ratios_y), f"VTI/GLD: {vti_to_gld}", font=font_ratios, fill=0)
-    draw.text((col_width + 5, ratios_y), f"PSTG/VTI: {pstg_to_vti}", font=font_ratios, fill=0)
-    draw.text((2 * col_width + 5, ratios_y), f"ORCL/VTI: {orcl_to_vti}", font=font_ratios, fill=0)
+    ratio_y = line_y + 5
+    cw = epd.height // 3
+    draw.text((10,           ratio_y), f"VTI/GLD:{vti_to_gld}", font=font_ratios, fill=0)
+    draw.text((cw + 5,       ratio_y), f"PSTG/VTI:{pstg_to_vti}", font=font_ratios, fill=0)
+    draw.text((2*cw + 5,     ratio_y), f"ORCL/VTI:{orcl_to_vti}", font=font_ratios, fill=0)
 
     # Footer
-    timestamp = datetime.now().strftime("%m/%d %H:%M")
-    battery_percent = get_battery_percentage()
-
-    footer_text = f"{timestamp}{'*' if used_fallback else ''} | {magic_sum} | ${quotes['STRC']} | {battery_percent}%"
-    footer_text_width, _ = draw.textsize(footer_text, font=font_footer)
-    footer_x = (epd.height - footer_text_width) // 2
+    timestamp = datetime.now().strftime("%m/%d %H:%M:%S")
+    strc_disp = f"${STRC}" if STRC != "N/A" else "STRC:N/A"
+    footer_text = f"{timestamp} | {magic_sum} | {strc_disp} | {battery}%"
+    fw, _ = draw.textsize(footer_text, font=font_footer)
+    fx = (epd.height - fw) // 2
 
     draw.rectangle((0, epd.width - 16, epd.height, epd.width), fill=0)
-    draw.text((footer_x, epd.width - 14), footer_text, font=font_footer, fill=255)
+    draw.text((fx, epd.width - 14), footer_text, font=font_footer, fill=255)
 
-    epd.display(epd.getbuffer(image))
-    epd.sleep()
+    logger.info(f"Footer rendered: {footer_text}")
 
+    # Display
+    try:
+        epd.display(epd.getbuffer(image))
+        epd.sleep()
+        logger.info("Display update complete.")
+    except Exception:
+        logger.exception("Display update FAILED")
+
+    # --- RTC Wake ---
     now = datetime.now().astimezone()
     wake_hour = EVENING_HOUR if is_am(now) else MORNING_HOUR
     waketime_str = now.replace(hour=wake_hour, minute=50, second=0, microsecond=0).isoformat()
-    os.popen(f'echo "rtc_alarm_set {waketime_str} 127" | nc -q 0 127.0.0.1 8423').read()
 
-    if now.hour in MANUAL_BOOT_HOURS:
-        logger.info("Manual boot suspected; skipping shutdown.")
-    else:
+    logger.info(f"Setting RTC wakeup: {waketime_str}")
+    rtc_rsp = os.popen(f'echo "rtc_alarm_set {waketime_str} 127" | nc -q 0 127.0.0.1 8423').read().strip()
+    logger.info(f"RTC response: {rtc_rsp}")
+
+    # --- Shutdown ---
+    if should_auto_shutdown():
+        logger.info("Auto-shutdown enabled. Shutting down.")
         os.system("sudo /sbin/shutdown -h now")
+    else:
+        logger.info("Auto-shutdown disabled — NOT shutting down.")
+
 
 if __name__ == "__main__":
     main()
