@@ -5,6 +5,7 @@ import time
 import json
 import logging
 import signal
+import subprocess
 import requests
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
@@ -74,7 +75,7 @@ def fetch_json(url, retries=10, delay=1):
     for attempt in range(1, retries + 1):
         try:
             logger.debug(f"Requesting {url} (attempt {attempt})")
-            response = requests.get(url, timeout=5)
+            response = requests.get(url, timeout=2)
             response.raise_for_status()
             logger.debug(f"Raw JSON from {url}: {response.text}")
             return response.json()
@@ -106,14 +107,9 @@ def get_quotes():
 
     quotes = data["value"]
 
-    # --- FIX: Prevent crash when quotes is not a dict ---
     if not isinstance(quotes, dict):
         logger.error(f"'value' returned non-dict quotes: type={type(quotes)} data={quotes}")
         return {}
-
-    # Remove timestamp safely
-    if "timestamp" in quotes:
-        quotes.pop("timestamp", None)
 
     logger.debug(f"Final parsed quotes: {quotes}")
     return quotes
@@ -133,12 +129,13 @@ def is_am(now=None):
     now = now or datetime.now()
     return now.hour < 12
 
-
 # --- Main Program ---
 def main():
-    logger.info("Starting minion display update...")
+    logger.info("---------------------------------------------")
+    logger.info("------------------MiNiON---------------------")
+    logger.info("---------------------------------------------")
 
-    # --- Init display ---
+    logger.info("Initializing display...")
     try:
         epd = epd2in13_V4.EPD()
         epd.init()
@@ -147,8 +144,9 @@ def main():
         return
 
     quotes = get_quotes()
+    timestamp = quotes.pop("timestamp")
 
-    # Extract values with safety
+    logger.info("Making REST calls to Home API...")
     BTC  = safe_get(quotes, "BTC-USD")
     VTI  = safe_get(quotes, "VTI")
     GLD  = safe_get(quotes, "GLD")
@@ -171,7 +169,7 @@ def main():
     magic_sum = get_magic_sum()
     battery = get_battery_percentage()
 
-    # --- Draw image ---
+    logger.info("Start rendering...")
     image = Image.new("1", (epd.height, epd.width), 255)
     draw = ImageDraw.Draw(image)
 
@@ -207,7 +205,6 @@ def main():
     draw.text((2*cw + 5,     ratio_y), f"ORCL/VTI:{orcl_to_vti}", font=font_ratios, fill=0)
 
     # Footer
-    timestamp = datetime.now().strftime("%m/%d %H:%M:%S")
     strc_disp = f"${STRC}" if STRC != "N/A" else "STRC:N/A"
     footer_text = f"{timestamp} | {magic_sum} | {strc_disp} | {battery}%"
     fw, _ = draw.textsize(footer_text, font=font_footer)
