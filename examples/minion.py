@@ -28,8 +28,9 @@ font_footer = ImageFont.truetype(font_path, 11)
 font_ratios = ImageFont.truetype(font_path, 10)
 
 # --- Constants ---
-MORNING_HOUR = 6
-EVENING_HOUR = 18
+MORNING_HOUR = 7
+MID_DAY_HOUR = 12
+EVENING_HOUR = 19
 terminate = False
 
 
@@ -125,9 +126,24 @@ def should_auto_shutdown():
         return False
 
 
-def is_am(now=None):
-    now = now or datetime.now()
-    return now.hour < 12
+def get_wake_hour(ts):
+    if ts.hour < 9:
+        return MID_DAY_HOUR
+    if ts.hour < 14:
+        return EVENING_HOUR
+    return MORNING_HOUR
+
+
+def parse_custom_timestamp(ts_str):
+    try:
+        # Assume current year if year not present
+        this_year = datetime.now().year
+        full_str = f"{this_year} {ts_str}"
+        return datetime.strptime(full_str, "%Y %m/%d %H:%M:%S").astimezone()
+    except Exception as e:
+        logger.warning(f"Failed to parse custom timestamp '{ts_str}': {e}")
+        return datetime.now()
+
 
 # --- Main Program ---
 def main():
@@ -224,9 +240,9 @@ def main():
         logger.exception("Display update FAILED")
 
     # --- RTC Wake ---
-    now = datetime.now().astimezone()
-    wake_hour = EVENING_HOUR if is_am(now) else MORNING_HOUR
-    waketime_str = now.replace(hour=wake_hour, minute=50, second=0, microsecond=0).isoformat()
+    ts = parse_custom_timestamp(timestamp)
+    wake_hour = get_wake_hour(ts)
+    waketime_str = ts.replace(hour=wake_hour, minute=15, second=0, microsecond=0).isoformat()
 
     logger.info(f"Setting RTC wakeup: {waketime_str}")
     rtc_rsp = os.popen(f'echo "rtc_alarm_set {waketime_str} 127" | nc -q 0 127.0.0.1 8423').read().strip()
