@@ -72,7 +72,7 @@ def get_battery_percentage():
 
 
 # --- Robust JSON fetch with retries ---
-def fetch_json(url, retries=10, delay=1):
+def fetch_json(url, retries=10, delay=3):
     for attempt in range(1, retries + 1):
         try:
             logger.debug(f"Requesting {url} (attempt {attempt})")
@@ -133,6 +133,13 @@ def get_wake_hour(ts):
         return EVENING_HOUR
     return MORNING_HOUR
 
+def shutdown():
+    if should_auto_shutdown():
+        logger.info("Auto-shutdown enabled. Shutting down.")
+        os.system("sudo /sbin/shutdown -h now")
+    else:
+        logger.info("Auto-shutdown disabled — NOT shutting down.")
+
 
 def parse_custom_timestamp(ts_str):
     try:
@@ -151,93 +158,95 @@ def main():
     logger.info("------------------MiNiON---------------------")
     logger.info("---------------------------------------------")
 
-    logger.info("Initializing display...")
-    try:
-        epd = epd2in13_V4.EPD()
-        epd.init()
-    except Exception as e:
-        logger.exception("Display initialization FAILED:")
-        return
-
-    quotes = get_quotes()
-    timestamp = quotes.pop("timestamp")
-
     logger.info("Making REST calls to Home API...")
-    BTC  = safe_get(quotes, "BTC-USD")
-    VTI  = safe_get(quotes, "VTI")
-    GLD  = safe_get(quotes, "GLD")
-    PSTG = safe_get(quotes, "PSTG")
-    ORCL = safe_get(quotes, "ORCL")
-    STRC = safe_get(quotes, "STRC")
-
-    # Compute ratios
-    def safe_ratio(a, b):
+    quotes = get_quotes()
+    timestamp = quotes.pop("timestamp", datetime.now().strftime("%m/%d %H:%M:%S"))
+    if not quotes:
+        logger.warning("Home API server not reachable. Skipping display update")
+    else:
+        logger.info("Initializing display...")
         try:
-            return round(float(a) / float(b), 2)
+            epd = epd2in13_V4.EPD()
+            epd.init()
         except Exception as e:
-            logger.warning(f"Ratio failed {a}/{b}: {e}")
-            return "N/A"
+            logger.exception("Display initialization FAILED:")
+            return
 
-    vti_to_gld = safe_ratio(VTI, GLD)
-    pstg_to_vti = safe_ratio(PSTG, VTI)
-    orcl_to_vti = safe_ratio(ORCL, VTI)
+        BTC  = safe_get(quotes, "BTC-USD")
+        VTI  = safe_get(quotes, "VTI")
+        GLD  = safe_get(quotes, "GLD")
+        PSTG = safe_get(quotes, "PSTG")
+        ORCL = safe_get(quotes, "ORCL")
+        STRC = safe_get(quotes, "STRC")
 
-    magic_sum = get_magic_sum()
-    battery = get_battery_percentage()
+        # Compute ratios
+        def safe_ratio(a, b):
+            try:
+                return round(float(a) / float(b), 2)
+            except Exception as e:
+                logger.warning(f"Ratio failed {a}/{b}: {e}")
+                return "N/A"
 
-    logger.info("Start rendering...")
-    image = Image.new("1", (epd.height, epd.width), 255)
-    draw = ImageDraw.Draw(image)
+        vti_to_gld = safe_ratio(VTI, GLD)
+        pstg_to_vti = safe_ratio(PSTG, VTI)
+        orcl_to_vti = safe_ratio(ORCL, VTI)
 
-    # Header
-    draw.rectangle((0, 0, epd.height, 22), fill=0)
-    draw.text((5, 4), "Minion", font=font_title, fill=255)
+        magic_sum = get_magic_sum()
+        battery = get_battery_percentage()
 
-    try:
-        btc_text = f"${int(float(BTC)):,}" if BTC != "N/A" else "BTC:N/A"
-    except Exception as e:
-        logger.warning(f"Failed to format BTC '{BTC}': {e}")
-        btc_text = "BTC:N/A"
-    w, _ = draw.textsize(btc_text, font=font_title)
-    draw.text((epd.height - w - 5, 4), btc_text, font=font_title, fill=255)
+        logger.info("Start rendering...")
+        image = Image.new("1", (epd.height, epd.width), 255)
+        draw = ImageDraw.Draw(image)
 
-    # Stock columns
-    left_x, right_x = 10, epd.height // 2 + 5
-    y0, dy = 28, 20
-    draw.text((left_x,  y0), f"VTI: ${VTI}", font=font_main, fill=0)
-    draw.text((left_x,  y0+dy), f"GLD: ${GLD}", font=font_main, fill=0)
-    draw.text((right_x, y0), f"PSTG: ${PSTG}", font=font_main, fill=0)
-    draw.text((right_x, y0+dy), f"ORCL: ${ORCL}", font=font_main, fill=0)
+        # Header
+        draw.rectangle((0, 0, epd.height, 22), fill=0)
+        draw.text((5, 4), "Minion", font=font_title, fill=255)
 
-    # Divider
-    line_y = y0 + 2*dy + 10
-    draw.line((0, line_y, epd.height, line_y), fill=0)
+        try:
+            btc_text = f"${int(float(BTC)):,}" if BTC != "N/A" else "BTC:N/A"
+        except Exception as e:
+            logger.warning(f"Failed to format BTC '{BTC}': {e}")
+            btc_text = "BTC:N/A"
+        w, _ = draw.textsize(btc_text, font=font_title)
+        draw.text((epd.height - w - 5, 4), btc_text, font=font_title, fill=255)
 
-    # Ratios
-    ratio_y = line_y + 5
-    cw = epd.height // 3
-    draw.text((10,           ratio_y), f"VTI/GLD:{vti_to_gld}", font=font_ratios, fill=0)
-    draw.text((cw + 5,       ratio_y), f"PSTG/VTI:{pstg_to_vti}", font=font_ratios, fill=0)
-    draw.text((2*cw + 5,     ratio_y), f"ORCL/VTI:{orcl_to_vti}", font=font_ratios, fill=0)
+        # Stock columns
+        left_x, right_x = 10, epd.height // 2 + 5
+        y0, dy = 28, 20
+        draw.text((left_x,  y0), f"VTI: ${VTI}", font=font_main, fill=0)
+        draw.text((left_x,  y0+dy), f"GLD: ${GLD}", font=font_main, fill=0)
+        draw.text((right_x, y0), f"PSTG: ${PSTG}", font=font_main, fill=0)
+        draw.text((right_x, y0+dy), f"ORCL: ${ORCL}", font=font_main, fill=0)
 
-    # Footer
-    strc_disp = f"${STRC}" if STRC != "N/A" else "STRC:N/A"
-    footer_text = f"{timestamp} | {magic_sum} | {strc_disp} | {battery}%"
-    fw, _ = draw.textsize(footer_text, font=font_footer)
-    fx = (epd.height - fw) // 2
+        # Divider
+        line_y = y0 + 2*dy + 10
+        draw.line((0, line_y, epd.height, line_y), fill=0)
 
-    draw.rectangle((0, epd.width - 16, epd.height, epd.width), fill=0)
-    draw.text((fx, epd.width - 14), footer_text, font=font_footer, fill=255)
+        # Ratios
+        ratio_y = line_y + 5
+        cw = epd.height // 3
+        draw.text((10,           ratio_y), f"VTI/GLD:{vti_to_gld}", font=font_ratios, fill=0)
+        draw.text((cw + 5,       ratio_y), f"PSTG/VTI:{pstg_to_vti}", font=font_ratios, fill=0)
+        draw.text((2*cw + 5,     ratio_y), f"ORCL/VTI:{orcl_to_vti}", font=font_ratios, fill=0)
 
-    logger.info(f"Footer rendered: {footer_text}")
+        # Footer
+        strc_disp = f"${STRC}" if STRC != "N/A" else "STRC:N/A"
+        footer_text = f"{timestamp} | {magic_sum} | {strc_disp} | {battery}%"
+        fw, _ = draw.textsize(footer_text, font=font_footer)
+        fx = (epd.height - fw) // 2
 
-    # Display
-    try:
-        epd.display(epd.getbuffer(image))
-        epd.sleep()
-        logger.info("Display update complete.")
-    except Exception:
-        logger.exception("Display update FAILED")
+        draw.rectangle((0, epd.width - 16, epd.height, epd.width), fill=0)
+        draw.text((fx, epd.width - 14), footer_text, font=font_footer, fill=255)
+
+        logger.info(f"Footer rendered: {footer_text}")
+
+        # Display
+        try:
+            epd.display(epd.getbuffer(image))
+            epd.sleep()
+            logger.info("Display update complete.")
+        except Exception:
+            logger.exception("Display update FAILED")
 
     # --- RTC Wake ---
     ts = parse_custom_timestamp(timestamp)
@@ -248,12 +257,7 @@ def main():
     rtc_rsp = os.popen(f'echo "rtc_alarm_set {waketime_str} 127" | nc -q 0 127.0.0.1 8423').read().strip()
     logger.info(f"RTC response: {rtc_rsp}")
 
-    # --- Shutdown ---
-    if should_auto_shutdown():
-        logger.info("Auto-shutdown enabled. Shutting down.")
-        os.system("sudo /sbin/shutdown -h now")
-    else:
-        logger.info("Auto-shutdown disabled — NOT shutting down.")
+    shutdown()
 
 
 if __name__ == "__main__":
