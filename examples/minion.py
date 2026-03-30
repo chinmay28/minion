@@ -31,7 +31,7 @@ font_ratios = ImageFont.truetype(font_path, 10)
 MORNING_HOUR = 7
 MID_DAY_HOUR = 12
 EVENING_HOUR = 19
-API_BASE_URL = "http://foo.local:9999/api/entries"
+API_BASE_URL = "http://foo:9999/api/entries"
 terminate = False
 
 
@@ -125,7 +125,7 @@ def should_auto_shutdown():
     data = fetch_json(api_url("minion-auto-shutdown"))
     try:
         logger.debug(f"Auto shutdown flag: {data['value']}")
-        return data["value"]["data"] == 1
+        return data["value"]["data"] in (1, "1", "yes", "YES")
     except Exception as e:
         logger.warning(f"Malformed auto-shutdown response: {data} or exc: {e}")
         return False
