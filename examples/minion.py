@@ -31,6 +31,7 @@ font_ratios = ImageFont.truetype(font_path, 10)
 MORNING_HOUR = 7
 MID_DAY_HOUR = 12
 EVENING_HOUR = 19
+API_BASE_URL = "http://foo.local:9999/api/entries"
 terminate = False
 
 
@@ -71,6 +72,10 @@ def get_battery_percentage():
         return "N/A"
 
 
+def api_url(entry_key):
+    return f"{API_BASE_URL}/{entry_key}"
+
+
 # --- Robust JSON fetch with retries ---
 def fetch_json(url, retries=10, delay=3):
     for attempt in range(1, retries + 1):
@@ -89,7 +94,7 @@ def fetch_json(url, retries=10, delay=3):
 
 
 def get_magic_sum():
-    data = fetch_json("http://nakedpi.local:9999/api/entries/minion-sum")
+    data = fetch_json(api_url("minion-sum"))
     try:
         result = data["value"]["data"]
         logger.debug(f"Magic sum: {result}")
@@ -100,7 +105,7 @@ def get_magic_sum():
 
 
 def get_quotes():
-    data = fetch_json("http://nakedpi.local:9999/api/entries/minion-quotes")
+    data = fetch_json(api_url("minion-quotes"))
 
     if "value" not in data:
         logger.error(f"Quotes missing 'value' field: {data}")
@@ -117,7 +122,7 @@ def get_quotes():
 
 
 def should_auto_shutdown():
-    data = fetch_json("http://nakedpi.local:9999/api/entries/minion-auto-shutdown")
+    data = fetch_json(api_url("minion-auto-shutdown"))
     try:
         logger.debug(f"Auto shutdown flag: {data['value']}")
         return data["value"]["enabled"] == 1
@@ -134,6 +139,7 @@ def get_wake_hour(ts):
     if ts.hour < 12:
         return EVENING_HOUR
     return MORNING_HOUR
+
 
 def shutdown():
     if should_auto_shutdown():
@@ -232,9 +238,9 @@ def main():
         # Ratios
         ratio_y = line_y + 5
         cw = epd.height // 3
-        draw.text((10,           ratio_y), f"VTI/GLD:{vti_to_gld}", font=font_ratios, fill=0)
-        draw.text((cw + 5,       ratio_y), f"PSTG/VTI:{pstg_to_vti}", font=font_ratios, fill=0)
-        draw.text((2*cw + 5,     ratio_y), f"ORCL/VTI:{orcl_to_vti}", font=font_ratios, fill=0)
+        draw.text((10,       ratio_y), f"VTI/GLD:{vti_to_gld}", font=font_ratios, fill=0)
+        draw.text((cw + 5,   ratio_y), f"PSTG/VTI:{pstg_to_vti}", font=font_ratios, fill=0)
+        draw.text((2*cw + 5, ratio_y), f"ORCL/VTI:{orcl_to_vti}", font=font_ratios, fill=0)
 
         # Footer
         ibit_disp = f"${IBIT}" if IBIT != "N/A" else "IBIT:N/A"
