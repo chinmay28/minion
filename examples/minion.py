@@ -89,9 +89,9 @@ def fetch_json(url, retries=10, delay=3):
 
 
 def get_magic_sum():
-    data = fetch_json("http://pi4:8000/api/minion-sum")
+    data = fetch_json("http://nakedpi.local:9999/api/entries/minion-sum")
     try:
-        result = data["value"]["sum"]
+        result = data["value"]["data"]
         logger.debug(f"Magic sum: {result}")
         return result
     except Exception as e:
@@ -100,7 +100,7 @@ def get_magic_sum():
 
 
 def get_quotes():
-    data = fetch_json("http://pi4:8000/api/minion-quotes")
+    data = fetch_json("http://nakedpi.local:9999/api/entries/minion-quotes")
 
     if "value" not in data:
         logger.error(f"Quotes missing 'value' field: {data}")
@@ -117,7 +117,7 @@ def get_quotes():
 
 
 def should_auto_shutdown():
-    data = fetch_json("http://pi4:8000/api/minion-auto-shutdown")
+    data = fetch_json("http://nakedpi.local:9999/api/entries/minion-auto-shutdown")
     try:
         logger.debug(f"Auto shutdown flag: {data['value']}")
         return data["value"]["enabled"] == 1
@@ -127,9 +127,11 @@ def should_auto_shutdown():
 
 
 def get_wake_hour(ts):
-    if ts.hour < 9:
-        return MID_DAY_HOUR
-    if ts.hour < 14:
+    #if ts.hour < 9:
+    #    return MID_DAY_HOUR
+    #if ts.hour < 14:
+    #    return EVENING_HOUR
+    if ts.hour < 12:
         return EVENING_HOUR
     return MORNING_HOUR
 
@@ -161,6 +163,10 @@ def main():
     logger.info("Making REST calls to Home API...")
     quotes = get_quotes()
     timestamp = quotes.pop("timestamp", datetime.now().strftime("%m/%d %H:%M:%S"))
+
+    ts = parse_custom_timestamp(timestamp)
+    wake_hour = get_wake_hour(ts)
+
     if not quotes:
         logger.warning("Home API server not reachable. Skipping display update")
     else:
@@ -178,6 +184,7 @@ def main():
         PSTG = safe_get(quotes, "PSTG")
         ORCL = safe_get(quotes, "ORCL")
         STRC = safe_get(quotes, "STRC")
+        IBIT = safe_get(quotes, "IBIT")
 
         # Compute ratios
         def safe_ratio(a, b):
@@ -230,8 +237,13 @@ def main():
         draw.text((2*cw + 5,     ratio_y), f"ORCL/VTI:{orcl_to_vti}", font=font_ratios, fill=0)
 
         # Footer
+        ibit_disp = f"${IBIT}" if IBIT != "N/A" else "IBIT:N/A"
         strc_disp = f"${STRC}" if STRC != "N/A" else "STRC:N/A"
-        footer_text = f"{timestamp} | {magic_sum} | {strc_disp} | {battery}%"
+        if wake_hour < 15:
+            footer_text = f"{timestamp} | {magic_sum} | {strc_disp} | {battery}%"
+        else:
+            footer_text = f"{timestamp} | {magic_sum} | {ibit_disp} | {battery}%"
+
         fw, _ = draw.textsize(footer_text, font=font_footer)
         fx = (epd.height - fw) // 2
 
@@ -249,8 +261,6 @@ def main():
             logger.exception("Display update FAILED")
 
     # --- RTC Wake ---
-    ts = parse_custom_timestamp(timestamp)
-    wake_hour = get_wake_hour(ts)
     waketime_str = ts.replace(hour=wake_hour, minute=15, second=0, microsecond=0).isoformat()
 
     logger.info(f"Setting RTC wakeup: {waketime_str}")
