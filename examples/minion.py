@@ -125,7 +125,7 @@ def should_auto_shutdown():
     data = fetch_json(api_url("minion-auto-shutdown"))
     try:
         logger.debug(f"Auto shutdown flag: {data['value']}")
-        return data["value"]["enabled"] == 1
+        return data["value"]["data"] == 1
     except Exception as e:
         logger.warning(f"Malformed auto-shutdown response: {data} or exc: {e}")
         return False
