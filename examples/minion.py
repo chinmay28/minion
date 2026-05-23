@@ -9,8 +9,14 @@ from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from lib.waveshare_epd import epd2in13_V4
 
+# --- Configuration (override via environment) ---
+LOG_FILE = os.environ.get("MINION_LOG_FILE", "/home/chinmay/minion.log")
+FONT_PATH = os.environ.get("MINION_FONT_PATH", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+API_BASE_URL = os.environ.get("MINION_API_BASE_URL", "http://nakedpi.stingray-boga.ts.net:9999/api/entries")
+PISUGAR_HOST = os.environ.get("MINION_PISUGAR_HOST", "127.0.0.1")
+PISUGAR_PORT = os.environ.get("MINION_PISUGAR_PORT", "8423")
+
 # --- Logging setup ---
-LOG_FILE = "/home/chinmay/minion.log"
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.DEBUG,
@@ -19,17 +25,24 @@ logging.basicConfig(
 logger = logging.getLogger()
 
 # --- Fonts ---
-font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-font_title = ImageFont.truetype(font_path, 16)
-font_main = ImageFont.truetype(font_path, 15)
-font_footer = ImageFont.truetype(font_path, 11)
-font_ratios = ImageFont.truetype(font_path, 10)
+font_title = ImageFont.truetype(FONT_PATH, 16)
+font_main = ImageFont.truetype(FONT_PATH, 15)
+font_footer = ImageFont.truetype(FONT_PATH, 11)
+font_ratios = ImageFont.truetype(FONT_PATH, 10)
 
 # --- Constants ---
 MORNING_HOUR = 7
-MID_DAY_HOUR = 12
 EVENING_HOUR = 19
-API_BASE_URL = "http://nakedpi.stingray-boga.ts.net:9999/api/entries"
+
+# Quote keys as published by the Home API (note: PSTG is published under "P")
+SYM_BTC = "BTC-USD"
+SYM_VTI = "VTI"
+SYM_GLD = "GLD"
+SYM_PSTG = "P"
+SYM_ORCL = "ORCL"
+SYM_STRC = "STRC"
+SYM_IBIT = "IBIT"
+
 terminate = False
 
 
@@ -54,9 +67,22 @@ def safe_get(d, key, default="N/A"):
     return value
 
 
+def fmt_price(label, value, as_int=False):
+    """Format a quote as a dollar value, or 'LABEL:N/A' when missing/invalid."""
+    if value == "N/A":
+        return f"{label}:N/A"
+    try:
+        if as_int:
+            return f"${int(float(value)):,}"
+        return f"${value}"
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Failed to format {label} '{value}': {e}")
+        return f"{label}:N/A"
+
+
 def get_battery_percentage():
     try:
-        result = os.popen('echo "get battery" | nc -q 0 127.0.0.1 8423').read().strip()
+        result = os.popen(f'echo "get battery" | nc -q 0 {PISUGAR_HOST} {PISUGAR_PORT}').read().strip()
         logger.debug(f"Battery raw response: {result}")
         if "battery:" in result:
             val = result.split(":")[1].strip()
@@ -130,10 +156,6 @@ def should_auto_shutdown():
 
 
 def get_wake_hour(ts):
-    #if ts.hour < 9:
-    #    return MID_DAY_HOUR
-    #if ts.hour < 14:
-    #    return EVENING_HOUR
     if ts.hour < 12:
         return EVENING_HOUR
     return MORNING_HOUR
@@ -182,13 +204,13 @@ def main():
             logger.exception("Display initialization FAILED:")
             return
 
-        BTC  = safe_get(quotes, "BTC-USD")
-        VTI  = safe_get(quotes, "VTI")
-        GLD  = safe_get(quotes, "GLD")
-        PSTG = safe_get(quotes, "P")
-        ORCL = safe_get(quotes, "ORCL")
-        STRC = safe_get(quotes, "STRC")
-        IBIT = safe_get(quotes, "IBIT")
+        BTC  = safe_get(quotes, SYM_BTC)
+        VTI  = safe_get(quotes, SYM_VTI)
+        GLD  = safe_get(quotes, SYM_GLD)
+        PSTG = safe_get(quotes, SYM_PSTG)
+        ORCL = safe_get(quotes, SYM_ORCL)
+        STRC = safe_get(quotes, SYM_STRC)
+        IBIT = safe_get(quotes, SYM_IBIT)
 
         # Compute ratios
         def safe_ratio(a, b):
@@ -213,11 +235,7 @@ def main():
         draw.rectangle((0, 0, epd.height, 22), fill=0)
         draw.text((5, 4), "Minion", font=font_title, fill=255)
 
-        try:
-            btc_text = f"${int(float(BTC)):,}" if BTC != "N/A" else "BTC:N/A"
-        except Exception as e:
-            logger.warning(f"Failed to format BTC '{BTC}': {e}")
-            btc_text = "BTC:N/A"
+        btc_text = fmt_price("BTC", BTC, as_int=True)
         w = int(draw.textlength(btc_text, font=font_title))
         draw.text((epd.height - w - 5, 4), btc_text, font=font_title, fill=255)
 
@@ -241,8 +259,8 @@ def main():
         draw.text((2*cw + 5, ratio_y), f"ORCL/VTI:{orcl_to_vti}", font=font_ratios, fill=0)
 
         # Footer
-        ibit_disp = f"${IBIT}" if IBIT != "N/A" else "IBIT:N/A"
-        strc_disp = f"${STRC}" if STRC != "N/A" else "STRC:N/A"
+        ibit_disp = fmt_price("IBIT", IBIT)
+        strc_disp = fmt_price("STRC", STRC)
         if wake_hour < 15:
             footer_text = f"{timestamp} | {magic_sum} | {strc_disp} | {battery}%"
         else:
@@ -268,7 +286,7 @@ def main():
     waketime_str = ts.replace(hour=wake_hour, minute=15, second=0, microsecond=0).isoformat()
 
     logger.info(f"Setting RTC wakeup: {waketime_str}")
-    rtc_rsp = os.popen(f'echo "rtc_alarm_set {waketime_str} 127" | nc -q 0 127.0.0.1 8423').read().strip()
+    rtc_rsp = os.popen(f'echo "rtc_alarm_set {waketime_str} 127" | nc -q 0 {PISUGAR_HOST} {PISUGAR_PORT}').read().strip()
     logger.info(f"RTC response: {rtc_rsp}")
 
     shutdown()
