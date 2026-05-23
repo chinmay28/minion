@@ -42,7 +42,7 @@ crashing.
 | Raspberry Pi Zero 2 W | The compute. Runs headless. |
 | Waveshare 2.13" e-Paper HAT (V4) | 250 × 122 px, black & white. Driver: `epd2in13_V4`. |
 | PiSugar 2 | LiPo UPS with a built-in RTC. Provides battery readings and the scheduled wake-up alarm. |
-| Case | Off-the-shelf enclosure. |
+| Case | A Pwnagotchi case — these are built for a Pi Zero + 2.13" Waveshare HAT, so the panel and ports line up. |
 
 ### GPIO wiring (BCM numbering)
 
