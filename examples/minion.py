@@ -2,10 +2,8 @@
 
 import os
 import time
-import json
 import logging
 import signal
-import subprocess
 import requests
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
@@ -220,7 +218,7 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to format BTC '{BTC}': {e}")
             btc_text = "BTC:N/A"
-        w, _ = draw.textsize(btc_text, font=font_title)
+        w = int(draw.textlength(btc_text, font=font_title))
         draw.text((epd.height - w - 5, 4), btc_text, font=font_title, fill=255)
 
         # Stock columns
@@ -250,7 +248,7 @@ def main():
         else:
             footer_text = f"{timestamp} | {magic_sum} | {ibit_disp} | {battery}%"
 
-        fw, _ = draw.textsize(footer_text, font=font_footer)
+        fw = int(draw.textlength(footer_text, font=font_footer))
         fx = (epd.height - fw) // 2
 
         draw.rectangle((0, epd.width - 16, epd.height, epd.width), fill=0)
