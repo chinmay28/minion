@@ -31,7 +31,7 @@ font_ratios = ImageFont.truetype(font_path, 10)
 MORNING_HOUR = 7
 MID_DAY_HOUR = 12
 EVENING_HOUR = 19
-API_BASE_URL = "http://foo:9999/api/entries"
+API_BASE_URL = "http://nakedpi.stingray-boga.ts.net:9999/api/entries"
 terminate = False
 
 
@@ -187,7 +187,7 @@ def main():
         BTC  = safe_get(quotes, "BTC-USD")
         VTI  = safe_get(quotes, "VTI")
         GLD  = safe_get(quotes, "GLD")
-        PSTG = safe_get(quotes, "PSTG")
+        PSTG = safe_get(quotes, "P")
         ORCL = safe_get(quotes, "ORCL")
         STRC = safe_get(quotes, "STRC")
         IBIT = safe_get(quotes, "IBIT")
