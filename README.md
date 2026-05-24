@@ -17,23 +17,23 @@ Everything under `lib/` is a trimmed copy of Waveshare's e-paper driver library
 +-------------------------------------------+
 | Minion                         $109,432   |   <- header: app name + BTC price
 |                                           |
-|  VTI: $301.20      P: $58.41              |   <- two columns of quotes
+|  VTI: $301.20      PSTG: $58.41           |   <- two columns of quotes
 |  GLD: $214.05      ORCL: $190.77          |
 | ----------------------------------------- |   <- divider
-|  VTI/GLD:1.41  P/VTI:0.19  ORCL/VTI:0.63  |   <- ratios
+|  VTI/GLD:1.41 PSTG/VTI:0.19 ORCL/VTI:0.63 |   <- ratios
 |     05/23 07:12:03 | 42 | $98.10 | 87%    |   <- footer (black bar)
 +-------------------------------------------+
 ```
 
 - **Header** — the app name on the left, the Bitcoin price (formatted with
   thousands separators) on the right.
-- **Columns** — `VTI` and `GLD` on the left; `P` and `ORCL` on the right.
-- **Ratios** — `VTI/GLD`, `P/VTI`, `ORCL/VTI`.
+- **Columns** — `VTI` and `GLD` on the left; `PSTG` and `ORCL` on the right.
+- **Ratios** — `VTI/GLD`, `PSTG/VTI`, `ORCL/VTI`.
 - **Footer** — `timestamp | magic-sum | rotating-quote | battery%`. The third
   field rotates by time of day: `IBIT` on the morning run, `STRC` on the
   afternoon/evening run.
 
-Any value the server omits renders as `N/A` (e.g. `P:N/A`) rather than
+Any value the server omits renders as `N/A` (e.g. `IBIT:N/A`) rather than
 crashing.
 
 ## Hardware
@@ -133,7 +133,8 @@ for the original device. Override them to run elsewhere:
 The quote ticker symbols are defined as `SYM_*` constants near the top of
 `minion.py`. Note the renderer's two-column layout is fixed to the current set
 of tickers; changing which symbols appear means editing the drawing code, not
-just a config value.
+just a config value. The display label can also differ from the lookup key —
+for example, the stock fetched under the key `P` is shown as `PSTG`.
 
 ## Home API contract
 
