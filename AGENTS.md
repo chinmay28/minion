@@ -61,7 +61,8 @@ There is **no test suite** and the hardware can't be exercised in CI:
   positions are hand-tuned pixel offsets, so changing the ticker set or fonts
   means re-checking the layout, not just swapping a string.
 - **Ticker symbols** are `SYM_*` constants. They are the home API's keys; the
-  on-screen label and the key are usually the same string but need not be.
+  on-screen label and the key are usually the same string but need not be —
+  e.g. the quote fetched under key `P` is displayed as `PSTG`.
 
 ## External contracts
 

@@ -34,7 +34,8 @@ font_ratios = ImageFont.truetype(FONT_PATH, 10)
 MORNING_HOUR = 7
 EVENING_HOUR = 19
 
-# Quote keys as published by the Home API
+# Quote keys as published by the Home API.
+# The stock shown as "PSTG" on the display is published under the key "P".
 SYM_BTC = "BTC-USD"
 SYM_VTI = "VTI"
 SYM_GLD = "GLD"
@@ -244,7 +245,7 @@ def main():
         y0, dy = 28, 20
         draw.text((left_x,  y0), f"VTI: ${VTI}", font=font_main, fill=0)
         draw.text((left_x,  y0+dy), f"GLD: ${GLD}", font=font_main, fill=0)
-        draw.text((right_x, y0), f"P: ${P}", font=font_main, fill=0)
+        draw.text((right_x, y0), f"PSTG: ${P}", font=font_main, fill=0)
         draw.text((right_x, y0+dy), f"ORCL: ${ORCL}", font=font_main, fill=0)
 
         # Divider
@@ -255,7 +256,7 @@ def main():
         ratio_y = line_y + 5
         cw = epd.height // 3
         draw.text((10,       ratio_y), f"VTI/GLD:{vti_to_gld}", font=font_ratios, fill=0)
-        draw.text((cw + 5,   ratio_y), f"P/VTI:{p_to_vti}", font=font_ratios, fill=0)
+        draw.text((cw + 5,   ratio_y), f"PSTG/VTI:{p_to_vti}", font=font_ratios, fill=0)
         draw.text((2*cw + 5, ratio_y), f"ORCL/VTI:{orcl_to_vti}", font=font_ratios, fill=0)
 
         # Footer
