@@ -1,8 +1,9 @@
 # Minion
 
 A battery-powered e-paper dashboard. A Raspberry Pi Zero 2 W wakes on a
-schedule, pulls a handful of market quotes from a home server, renders them on
-a Waveshare 2.13" display, schedules its next wake-up, and powers itself back
+schedule, pulls a handful of market quotes from a home server
+([HomeAPI](https://github.com/chinmay28/HomeAPI)), renders them on a Waveshare
+2.13" display, schedules its next wake-up, and powers itself back
 off. Because the panel holds its image without power, the dashboard stays
 readable while the Pi is asleep, so a single charge lasts a long time.
 
@@ -136,26 +137,53 @@ just a config value.
 
 ## Home API contract
 
-`minion.py` expects a small REST API at `MINION_API_BASE_URL` exposing these
-entries, each returning JSON shaped as `{"value": ...}`:
+The data is served by [HomeAPI](https://github.com/chinmay28/HomeAPI), a
+self-hosted key-value store. Each datum is an *entry* with a `key` and a
+`value`; `minion.py` fetches three entries **by key** from
+`MINION_API_BASE_URL` (which already includes the `/api/entries` path):
 
-- **`GET /minion-quotes`** — a map of ticker → price string, plus a
-  `timestamp`:
+```
+GET {MINION_API_BASE_URL}/{key}
+```
+
+HomeAPI resolves numeric path segments as IDs and everything else as keys, so
+`.../api/entries/minion-quotes` returns the entry whose key is `minion-quotes`.
+A single-entry response is the full record (`id`, `category`, `key`, `value`,
+`created_at`, `updated_at`), but `minion.py` only reads `value`.
+
+The shape of `value` follows a HomeAPI convention: a stored value that is
+itself valid JSON is returned as-is, while a plain-text value is wrapped as
+`{"data": "..."}`. That is why the quotes entry below is a bare object while
+the other two are nested under `data`.
+
+- **`minion-quotes`** — stored as a JSON object: ticker → price string, plus a
+  `timestamp`. The full response:
   ```json
-  {"value": {"BTC-USD": "109432", "VTI": "301.20", "GLD": "214.05",
-             "P": "58.41", "ORCL": "190.77", "STRC": "98.10",
-             "IBIT": "61.30", "timestamp": "05/23 07:12:03"}}
+  {
+    "id": 1,
+    "category": "minion",
+    "key": "minion-quotes",
+    "value": {
+      "BTC-USD": "109432", "VTI": "301.20", "GLD": "214.05", "P": "58.41",
+      "ORCL": "190.77", "STRC": "98.10", "IBIT": "61.30",
+      "timestamp": "05/23 07:12:03"
+    },
+    "created_at": "...",
+    "updated_at": "..."
+  }
   ```
   The timestamp is `MM/DD HH:MM:SS`; the current year is assumed. An empty or
   malformed payload is treated as "server unreachable" and the display update
   is skipped.
-- **`GET /minion-sum`** — the "magic sum" shown in the footer:
+- **`minion-sum`** — plain text; the "magic sum" shown in the footer, read from
+  `value.data`:
   ```json
-  {"value": {"data": 42}}
+  {"value": {"data": "42"}}
   ```
-- **`GET /minion-auto-shutdown`** — whether the Pi may power off after this run:
+- **`minion-auto-shutdown`** — plain text; whether the Pi may power off after
+  this run, read from `value.data`:
   ```json
-  {"value": {"data": 1}}
+  {"value": {"data": "1"}}
   ```
   Truthy values: `1`, `"1"`, `"yes"`, `"YES"`.
 

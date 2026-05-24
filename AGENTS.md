@@ -68,8 +68,12 @@ There is **no test suite** and the hardware can't be exercised in CI:
 `minion.py` depends on two services it does not own (full shapes in
 `README.md`):
 
-- **Home API** at `MINION_API_BASE_URL` — `GET` endpoints `minion-quotes`,
-  `minion-sum`, `minion-auto-shutdown`, each returning `{"value": ...}`.
+- **Home API** — [HomeAPI](https://github.com/chinmay28/HomeAPI), a key-value
+  store, at `MINION_API_BASE_URL`. `minion.py` fetches the entries
+  `minion-quotes`, `minion-sum`, and `minion-auto-shutdown` by key and reads
+  their `value` field. HomeAPI returns JSON values as-is and wraps plain-text
+  values as `{"data": "..."}`, which is why quotes is a bare object but sum and
+  auto-shutdown are read from `value.data`.
 - **PiSugar server** on `MINION_PISUGAR_HOST:PORT` — line protocol over TCP via
   `nc`; commands `get battery` and `rtc_alarm_set <iso8601> 127`.
 
