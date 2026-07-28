@@ -6,10 +6,15 @@ the user-facing project description.
 ## What this repo is
 
 A single-purpose application: a battery-powered Waveshare e-paper dashboard
-driven by a Raspberry Pi Zero 2 W. **All first-party code lives in one file,
+driven by a Raspberry Pi Zero 2 W. **The application is one file,
 [`examples/minion.py`](examples/minion.py).** It fetches market quotes from a
 home API, renders them to a 2.13" panel, schedules an RTC wake-up via PiSugar,
 and shuts the Pi down.
+
+The only other first-party file is
+[`scripts/quickstart.sh`](scripts/quickstart.sh), the one-command installer
+(`curl … | sudo bash`). It provisions deps, SPI, `/etc/minion.env`, and a
+`Type=oneshot` `minion.service`.
 
 `lib/waveshare_epd/` is a **vendored, trimmed copy** of Waveshare's driver
 library. Only two modules are kept — `epd2in13_V4.py` (the panel driver) and
@@ -60,6 +65,13 @@ There is **no test suite** and the hardware can't be exercised in CI:
   `(epd.height, epd.width)` = `(250, 122)`. The two-column layout and ratio
   positions are hand-tuned pixel offsets, so changing the ticker set or fonts
   means re-checking the layout, not just swapping a string.
+- **The installer never rewrites `/etc/minion.env`.** Adding a new `MINION_*`
+  variable therefore does *not* reach already-deployed devices — give it a
+  working default in `minion.py`, and add it to the template in
+  `scripts/quickstart.sh` for fresh installs.
+- **The installer must never run `minion.py`** as a self-check (a run sets an
+  RTC alarm and can power the machine off). Its verification is a compile +
+  import check as the service user; hardware-side gaps warn, they don't fail.
 - **Ticker symbols** are `SYM_*` constants. They are the home API's keys; the
   on-screen label and the key are usually the same string but need not be —
   e.g. the quote fetched under key `P` is displayed as `PSTG`.

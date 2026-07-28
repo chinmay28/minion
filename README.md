@@ -11,6 +11,35 @@ The entire application is one script: [`examples/minion.py`](examples/minion.py)
 Everything under `lib/` is a trimmed copy of Waveshare's e-paper driver library
 (only the parts the 2.13" V4 panel needs).
 
+## Quick start
+
+On a Raspberry Pi with the HAT seated:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chinmay28/minion/master/scripts/quickstart.sh | sudo bash
+```
+
+That installs the dependencies, enables SPI, writes `/etc/minion.env`, and
+installs `minion.service` — a `Type=oneshot` unit that runs one refresh at every
+boot. Point it at your own server on the first install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chinmay28/minion/master/scripts/quickstart.sh \
+  | sudo MINION_API_BASE_URL=http://your-host:9999/api/entries bash
+```
+
+**Nothing is run at install time.** Minion paints the panel on the *next* boot,
+and the PiSugar RTC is what powers the Pi back on. That is deliberate: a run
+schedules an RTC alarm and — if the server's auto-shutdown flag is set — powers
+the machine off, so an installer that "verified itself" by running the app would
+shut down the Pi you are typing on. To do it anyway, pass `MINION_RUN_NOW=1`.
+
+Re-run the same command any time to upgrade. It is idempotent, it never
+overwrites `/etc/minion.env`, and a checkout that fails its compile/import check
+is rolled back to the previous commit. See
+[Installer options](#installer-options) for the full list of variables, or
+[Setup](#setup) to do it by hand.
+
 ## What it shows
 
 ```
@@ -88,6 +117,7 @@ examples/minion.py        The application (the only first-party code)
 lib/waveshare_epd/        Trimmed Waveshare driver library
   epd2in13_V4.py            Panel driver for the 2.13" V4
   epdconfig.py              GPIO/SPI abstraction (Raspberry Pi path)
+scripts/quickstart.sh     One-command installer (deps, SPI, config, boot unit)
 requirements.txt          Runtime Python dependencies
 README.md                 This file
 AGENTS.md                 Notes for AI coding agents
@@ -98,7 +128,8 @@ so it must be run from the repository root (the `lib` package is not installed).
 
 ## Setup
 
-On the Pi (Raspberry Pi OS):
+What [`scripts/quickstart.sh`](scripts/quickstart.sh) automates, step by step —
+follow this if you would rather do it by hand. On the Pi (Raspberry Pi OS):
 
 1. **Enable SPI** — `sudo raspi-config` → *Interface Options* → *SPI* → enable,
    then reboot.
@@ -117,10 +148,48 @@ On the Pi (Raspberry Pi OS):
 5. **Allow passwordless shutdown** for the user that runs the script (the
    script calls `sudo /sbin/shutdown -h now`), e.g. via a `sudoers` rule.
 
+`pisugar-server` is the one piece the installer will not install for you — it is
+a third-party service with its own installer. Quickstart detects whether it is
+answering and warns if it is not.
+
+## Installer options
+
+`scripts/quickstart.sh` reads these from the environment; all are optional.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MINION_REPO` | `https://github.com/chinmay28/minion.git` | Source to clone |
+| `MINION_REF` | `master` | Branch, tag, or commit to deploy |
+| `MINION_USER` | the invoking `sudo` user, else `minion` | User the service runs as |
+| `MINION_PREFIX` | `/opt/minion` | Install prefix (source → `$PREFIX/src`, venv → `$PREFIX/venv`) |
+| `MINION_CONFIG` | `/etc/minion.env` | Env file the unit reads |
+| `MINION_API_BASE_URL` | the original device's tailnet URL | Seeded into the config on **first install only** |
+| `MINION_LOG_FILE` | `<service user's home>/minion.log` | Seeded into the config on first install only |
+| `ENABLE_SPI` | `auto` | `never` to leave the SPI interface alone |
+| `MINION_RUN_NOW` | `0` | `1` to run one refresh after installing — **may power the machine off** |
+
+Notes on how it behaves:
+
+- **Run it from a checkout** (`sudo ./scripts/quickstart.sh`) and it installs
+  *that* tree in place instead of cloning a second copy — which is what you want
+  on a device where the repo already lives in a user's home.
+- **The config file is written once and never rewritten.** It is the only state
+  Minion has, and it is what makes one device differ from another; clobbering it
+  on upgrade would silently repoint your Pi at somebody else's API.
+- **The service user defaults to whoever ran `sudo`**, matching the original
+  deployment (log in that user's home, already in the `spi`/`gpio` groups). Piped
+  into a bare root shell it falls back to a dedicated `minion` system account.
+- **Off a Raspberry Pi it still installs**, skipping the SPI and PiSugar steps
+  and warning about them, so it is usable for staging on a plain Debian box.
+- **Hardware-side gaps warn rather than fail.** A missing panel, PiSugar, or
+  unreachable API are all conditions Minion is designed to survive at runtime, so
+  they should not abort an install.
+
 ## Configuration
 
 All deployment-specific values are environment variables with defaults baked in
-for the original device. Override them to run elsewhere:
+for the original device. Override them to run elsewhere — quickstart writes them
+into `/etc/minion.env`, which `minion.service` loads as an `EnvironmentFile`:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -191,8 +260,19 @@ the other two are nested under `data`.
 ## Running
 
 The script is designed to run **once at boot** and then shut the Pi down,
-relying on the PiSugar RTC to power it back on. Wire it into a boot service
-(systemd unit or cron `@reboot`), for example:
+relying on the PiSugar RTC to power it back on. Quickstart wires that up as a
+`Type=oneshot` systemd unit with no `Restart=` — a failed run must not retry in a
+loop, because the panel keeps its last image and retrying would only burn
+battery:
+
+```bash
+systemctl status minion          # result of the last boot's run
+systemctl start minion           # force a refresh now (may power the Pi off)
+journalctl -u minion -n 50
+systemctl disable minion         # stop running it at boot
+```
+
+By hand, any boot hook works — a unit of your own or cron `@reboot`:
 
 ```cron
 @reboot cd /home/chinmay/minion && /usr/bin/python examples/minion.py
