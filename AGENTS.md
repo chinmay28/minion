@@ -54,8 +54,14 @@ There is **no test suite** and the hardware can't be exercised in CI:
 
 ## Gotchas
 
-- **Run from the repo root.** The import is `from lib.waveshare_epd import
-  epd2in13_V4`; `lib` is not an installed package. CWD matters.
+- **The repo root must be on `PYTHONPATH`.** The import is `from
+  lib.waveshare_epd import epd2in13_V4` and `lib` is not an installed package.
+  CWD is *not* sufficient: `python examples/minion.py` sets `sys.path[0]` to
+  `examples/`, not the working directory, so the import fails with
+  `ModuleNotFoundError: No module named 'lib'`. Any launcher — cron line,
+  systemd unit, shell wrapper — has to export `PYTHONPATH=<repo root>`. This has
+  bitten this project once already; `scripts/quickstart.sh` now verifies it
+  against the generated unit file.
 - **Pillow ≥ 10.** Use `ImageDraw.textlength()` for text width;
   `textsize()` was removed in Pillow 10 and must not be reintroduced.
 - **Auto-shutdown is intentionally fail-safe.** If the home API is unreachable,

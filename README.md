@@ -124,7 +124,15 @@ AGENTS.md                 Notes for AI coding agents
 ```
 
 The script imports the driver with `from lib.waveshare_epd import epd2in13_V4`,
-so it must be run from the repository root (the `lib` package is not installed).
+and `lib` is not an installed package — so **the repository root must be on
+`PYTHONPATH`**. Changing directory to it is *not* enough: `python
+examples/minion.py` puts `examples/` on `sys.path[0]`, not the working
+directory, so without `PYTHONPATH` the import fails with `ModuleNotFoundError:
+No module named 'lib'`. Run it the way the boot hook does:
+
+```bash
+cd ~/minion && export PYTHONPATH=$(pwd) && python examples/minion.py
+```
 
 ## Setup
 
@@ -161,7 +169,8 @@ answering and warns if it is not.
 | `MINION_REPO` | `https://github.com/chinmay28/minion.git` | Source to clone |
 | `MINION_REF` | `master` | Branch, tag, or commit to deploy |
 | `MINION_USER` | the invoking `sudo` user, else `minion` | User the service runs as |
-| `MINION_PREFIX` | `/opt/minion` | Install prefix (source → `$PREFIX/src`, venv → `$PREFIX/venv`) |
+| `MINION_SRC_DIR` | `~/minion` if it exists, else `$PREFIX/src` | Checkout to install from |
+| `MINION_PREFIX` | `/opt/minion` | Install prefix (venv → `$PREFIX/venv`; clone target if adopting nothing) |
 | `MINION_CONFIG` | `/etc/minion.env` | Env file the unit reads |
 | `MINION_API_BASE_URL` | the original device's tailnet URL | Seeded into the config on **first install only** |
 | `MINION_LOG_FILE` | `<service user's home>/minion.log` | Seeded into the config on first install only |
@@ -170,9 +179,15 @@ answering and warns if it is not.
 
 Notes on how it behaves:
 
-- **Run it from a checkout** (`sudo ./scripts/quickstart.sh`) and it installs
-  *that* tree in place instead of cloning a second copy — which is what you want
-  on a device where the repo already lives in a user's home.
+- **An existing checkout is adopted, never duplicated.** If the repo is already
+  at `~/minion` — or you run the script from inside a checkout — that tree is
+  what gets installed. Cloning a second copy under `/opt` would leave two
+  installs racing at boot. Adopted trees are only ever fast-forwarded, never
+  when dirty, and never rolled back; they belong to you, not to the installer.
+- **A leftover `@reboot` crontab entry is detected and reported.** If you set
+  this device up by hand, that line still fires at boot alongside the unit — two
+  processes fighting over the same GPIO pins. The installer tells you; removing
+  it is your call.
 - **The config file is written once and never rewritten.** It is the only state
   Minion has, and it is what makes one device differ from another; clobbering it
   on upgrade would silently repoint your Pi at somebody else's API.
@@ -272,11 +287,16 @@ journalctl -u minion -n 50
 systemctl disable minion         # stop running it at boot
 ```
 
-By hand, any boot hook works — a unit of your own or cron `@reboot`:
+By hand, any boot hook works — a unit of your own or cron `@reboot`. Note the
+`PYTHONPATH` export; without it the driver import fails (see
+[Repository layout](#repository-layout)):
 
 ```cron
-@reboot cd /home/chinmay/minion && /usr/bin/python examples/minion.py
+@reboot cd ~/minion/ && export PYTHONPATH=$(pwd) && python examples/minion.py
 ```
+
+If you switch to the systemd unit, **remove the crontab line** — otherwise both
+fire at boot and race each other for the GPIO pins.
 
 > **Heads up:** running `minion.py` will (by default) schedule an RTC alarm and
 > attempt to shut the machine down. Don't run it casually on a Pi you want to

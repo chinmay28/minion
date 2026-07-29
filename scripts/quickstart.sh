@@ -24,8 +24,14 @@
 #     SPI device node, Home API reachability, PiSugar socket, sudo rule. Missing
 #     hardware-side pieces WARN rather than fail: this same script is useful on
 #     a plain Debian box for staging, where there is no panel to talk to.
+#   * An existing checkout is ADOPTED, never duplicated. A device set up by hand
+#     has the repo at ~/minion and an `@reboot` crontab pointing at it; cloning a
+#     second copy under /opt would leave two installs racing at boot. The old
+#     crontab entry is detected and reported (but never edited — that call is
+#     the owner's).
 #   * Idempotent. Re-run any time to upgrade in place. If the new checkout fails
-#     its compile/import check, it is ROLLED BACK to the previous commit.
+#     its compile/import check, it is ROLLED BACK to the previous commit. Adopted
+#     trees are only ever fast-forwarded, and never when they are dirty.
 #
 # Configure via environment variables (all optional):
 #
@@ -33,7 +39,9 @@
 #   MINION_REF            branch/tag/commit     (default: master)
 #   MINION_USER           user the service runs as
 #                                               (default: the invoking sudo user, else 'minion')
-#   MINION_PREFIX         install prefix        (default: /opt/minion; source -> $PREFIX/src)
+#   MINION_SRC_DIR        use this checkout     (default: ~/minion or a checkout you run this
+#                                               from, if either exists; else clone to $PREFIX/src)
+#   MINION_PREFIX         install prefix        (default: /opt/minion; venv -> $PREFIX/venv)
 #   MINION_CONFIG         env file for the unit (default: /etc/minion.env)
 #   MINION_API_BASE_URL   Home API base URL     (seeded into the config on FIRST install only)
 #   MINION_LOG_FILE       log path              (default: <service user's home>/minion.log)
@@ -90,7 +98,9 @@ if [ -z "$SVC_USER" ]; then
   fi
 fi
 
-SRC_DIR="$PREFIX/src"
+SVC_HOME="$(getent passwd "$SVC_USER" 2>/dev/null | cut -d: -f6)"
+[ -n "$SVC_HOME" ] || SVC_HOME="/var/lib/$SVC_USER"
+
 VENV_DIR="$PREFIX/venv"
 VENV_PY="$VENV_DIR/bin/python"
 SERVICE_NAME="minion"
@@ -102,16 +112,31 @@ SUDOERS_PATH="/etc/sudoers.d/minion"
 IS_PI=0
 grep -qi raspberry /proc/cpuinfo 2>/dev/null && IS_PI=1
 
-# Running from inside an existing checkout (sudo ./scripts/quickstart.sh) rather
-# than piped from curl? Then install that checkout in place instead of cloning
-# a second copy — the original device already has the repo in the user's home.
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd)"
-LOCAL_CHECKOUT=""
-if git -C "$SELF_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
-  top="$(git -C "$SELF_DIR" rev-parse --show-toplevel)"
-  if [ -f "$top/examples/minion.py" ] && [ -d "$top/lib/waveshare_epd" ]; then
-    LOCAL_CHECKOUT="$top"
-    SRC_DIR="$top"
+is_minion_tree() { [ -f "$1/examples/minion.py" ] && [ -d "$1/lib/waveshare_epd" ]; }
+
+# Where the code lives. A device that already runs Minion has the repo checked
+# out in the user's home and a crontab pointing at it — cloning a second copy
+# under $PREFIX would leave two installs racing each other at boot. So: adopt an
+# existing checkout wherever we find one, and only clone when there is none.
+# ADOPTED=1 marks a tree the user maintains, which we treat conservatively.
+SRC_DIR=""
+ADOPTED=0
+if [ -n "${MINION_SRC_DIR:-}" ]; then
+  is_minion_tree "$MINION_SRC_DIR" \
+    || die "MINION_SRC_DIR=$MINION_SRC_DIR is not a Minion checkout (no examples/minion.py + lib/waveshare_epd)."
+  SRC_DIR="$MINION_SRC_DIR"; ADOPTED=1
+else
+  # Running from inside a checkout (sudo ./scripts/quickstart.sh, or a piped
+  # install launched from the repo root)? Use that one.
+  SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd)"
+  if top="$(git -C "$SELF_DIR" rev-parse --show-toplevel 2>/dev/null)" && is_minion_tree "$top"; then
+    SRC_DIR="$top"; ADOPTED=1
+  elif is_minion_tree "$SVC_HOME/minion"; then
+    SRC_DIR="$SVC_HOME/minion"; ADOPTED=1        # the existing-device layout
+  elif is_minion_tree "$PREFIX/src"; then
+    SRC_DIR="$PREFIX/src"                        # a previous quickstart install
+  else
+    SRC_DIR="$PREFIX/src"                        # nothing yet — clone here
   fi
 fi
 
@@ -120,16 +145,19 @@ printf '  %-10s %s\n' "source"  "$SRC_DIR"
 printf '  %-10s %s\n' "venv"    "$VENV_DIR"
 printf '  %-10s %s\n' "config"  "$CONFIG_FILE"
 printf '  %-10s %s\n' "service" "${SERVICE_NAME}.service (oneshot at boot, user: $SVC_USER)"
+[ "$ADOPTED" -eq 1 ] && printf '  %-10s %s\n' "" "(existing checkout — adopted, not re-cloned)"
 [ "$IS_PI" -eq 1 ] || printf '  %-10s %s\n' "platform" "not a Raspberry Pi — display/PiSugar steps will be skipped"
 
-# Run git as the service user so the tree stays owned by them (git refuses to
-# read a repo owned by someone else). Falls back to plain exec pre-user-creation.
+# Run git/python as the service user so the tree stays owned by them (git
+# refuses to read a repo owned by someone else) and so the checks see the same
+# environment the unit will. HOME is set explicitly: runuser keeps the caller's
+# environment, and leaving HOME=/root makes git and pip read root's config.
 as_svc() {
   if id -u "$SVC_USER" >/dev/null 2>&1; then
     if command -v runuser >/dev/null 2>&1; then
-      runuser -u "$SVC_USER" -- "$@"
+      runuser -u "$SVC_USER" -- env HOME="$SVC_HOME" "$@"
     else
-      sudo -u "$SVC_USER" --preserve-env=PATH "$@"
+      sudo -u "$SVC_USER" --preserve-env=PATH env HOME="$SVC_HOME" "$@"
     fi
   else
     "$@"
@@ -198,13 +226,11 @@ step "[2/8] Service account '$SVC_USER'"
 if id -u "$SVC_USER" >/dev/null 2>&1; then
   ok "user '$SVC_USER' already exists"
 else
-  useradd --system --create-home --home-dir "/var/lib/$SVC_USER" \
+  useradd --system --create-home --home-dir "$SVC_HOME" \
           --shell "$(command -v nologin || echo /usr/sbin/nologin)" "$SVC_USER"
   ok "created system user '$SVC_USER'"
 fi
 SVC_GROUP="$(id -gn "$SVC_USER")"
-SVC_HOME="$(getent passwd "$SVC_USER" | cut -d: -f6)"
-[ -n "$SVC_HOME" ] || SVC_HOME="/var/lib/$SVC_USER"
 
 # SPI/GPIO access without root. These groups only exist on Raspberry Pi OS
 # (its udev rules own the device nodes), so add only what is present.
@@ -238,10 +264,20 @@ fi
 # ---------------------------------------------------------------------------
 step "[3/8] Source at $SRC_DIR"
 PREV_SHA=""
-if [ -n "$LOCAL_CHECKOUT" ]; then
-  warn "installing your existing checkout in place (no git fetch)."
-  PREV_SHA="$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || true)"
-  ok "source at ${PREV_SHA:0:12}"
+if [ "$ADOPTED" -eq 1 ]; then
+  # This tree belongs to the user, not to us: never reset a branch under them.
+  # Fast-forward only, and only when there is nothing to lose.
+  PREV_SHA="$(as_svc git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || true)"
+  log "adopting the existing checkout (not cloning a second copy)"
+  if [ ! -d "$SRC_DIR/.git" ]; then
+    ok "source at $SRC_DIR (not a git checkout — left as is)"
+  elif [ -n "$(as_svc git -C "$SRC_DIR" status --porcelain 2>/dev/null)" ]; then
+    warn "$SRC_DIR has uncommitted changes — leaving it untouched."
+  elif as_svc git -C "$SRC_DIR" pull --ff-only >/dev/null 2>&1; then
+    ok "fast-forwarded to $(as_svc git -C "$SRC_DIR" rev-parse --short HEAD)"
+  else
+    warn "could not fast-forward $SRC_DIR (no upstream, or diverged) — leaving it as is."
+  fi
 elif [ -d "$SRC_DIR/.git" ]; then
   PREV_SHA="$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || true)"
   log "updating to $MINION_REF…"
@@ -257,9 +293,16 @@ else
     || die "clone failed — check connectivity to $MINION_REPO"
   ok "cloned to $SRC_DIR"
 fi
-chown -R "$SVC_USER":"$SVC_GROUP" "$PREFIX" 2>/dev/null || true
-[ -f "$SRC_DIR/examples/minion.py" ] || die "no examples/minion.py at $SRC_DIR — checkout failed?"
-[ -d "$SRC_DIR/lib/waveshare_epd" ] || die "no lib/waveshare_epd at $SRC_DIR — checkout failed?"
+# Only take ownership of trees we manage; an adopted checkout in someone's home
+# already belongs to them and is none of our business.
+[ "$ADOPTED" -eq 1 ] || chown -R "$SVC_USER":"$SVC_GROUP" "$PREFIX" 2>/dev/null || true
+is_minion_tree "$SRC_DIR" || die "no examples/minion.py + lib/waveshare_epd at $SRC_DIR — checkout failed?"
+
+# The service user has to be able to reach the code at boot. A checkout under a
+# 0700 home is readable by its owner, but if the unit ever runs as someone else
+# this is the failure that shows up as a mysterious ExecStart=203/EXEC.
+as_svc test -r "$SRC_DIR/examples/minion.py" \
+  || warn "'$SVC_USER' cannot read $SRC_DIR/examples/minion.py — check the permissions on $SRC_DIR."
 
 # ---------------------------------------------------------------------------
 # 4. Python environment (+ the check that gates a rollback)
@@ -309,6 +352,14 @@ verify_build() {
   [ "$rc" -eq 0 ] || return 1
   as_svc "$VENV_PY" -c 'from PIL import Image, ImageDraw, ImageFont; import requests' \
     >"$BUILD_LOG" 2>&1 || return 1
+  # Resolve the vendored driver exactly as the unit will — same user, same
+  # PYTHONPATH. find_spec stops at the parent packages (both __init__.py are
+  # empty), so this proves the import path without importing epdconfig, which
+  # would seize the GPIO pins the moment it loaded.
+  as_svc env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SRC_DIR" "$VENV_PY" -c \
+    'import importlib.util as u, sys
+sys.exit(0 if u.find_spec("lib.waveshare_epd.epd2in13_V4") else 1)' \
+    >"$BUILD_LOG" 2>&1 || return 1
   return 0
 }
 
@@ -330,7 +381,9 @@ if verify_build; then
 else
   warn "the new checkout failed its compile/import check:"
   sed -n '1,20p' "$BUILD_LOG" >&2
-  if [ "$UPGRADE" -eq 1 ] && [ -n "$PREV_SHA" ] && [ -z "$LOCAL_CHECKOUT" ]; then
+  # Only roll back a tree we manage. Checking out a different commit in someone's
+  # own checkout would be a rude surprise, so an adopted tree is left alone.
+  if [ "$UPGRADE" -eq 1 ] && [ -n "$PREV_SHA" ] && [ "$ADOPTED" -eq 0 ]; then
     warn "rolling back to ${PREV_SHA:0:12}…"
     as_svc git -C "$SRC_DIR" checkout -q -B deploy "$PREV_SHA"
     build_env
@@ -441,8 +494,14 @@ step "[7/8] systemd boot service"
 
 # Type=oneshot, no Restart=: one refresh per boot, and a failure must not retry
 # in a loop. The PiSugar RTC is the scheduler — the unit just runs at power-on.
-# WorkingDirectory is the repo root because the import is
-# `from lib.waveshare_epd import epd2in13_V4` and lib/ is not installed.
+#
+# PYTHONPATH is the whole ballgame. minion.py does
+# `from lib.waveshare_epd import epd2in13_V4`, and lib/ is not an installed
+# package. WorkingDirectory alone does NOT make that import work: running
+# `python examples/minion.py` puts examples/ on sys.path[0], not the cwd, so the
+# import fails with ModuleNotFoundError: No module named 'lib'. The repo root has
+# to be on PYTHONPATH — which is exactly what the hand-rolled crontab this
+# replaces did with `export PYTHONPATH=$(pwd)`.
 cat > "$UNIT_PATH" <<UNIT
 [Unit]
 Description=Minion — e-paper market dashboard (one refresh per boot)
@@ -455,8 +514,9 @@ Type=oneshot
 User=$SVC_USER
 Group=$SVC_GROUP
 WorkingDirectory=$SRC_DIR
+Environment=PYTHONPATH=$SRC_DIR
 EnvironmentFile=-$CONFIG_FILE
-ExecStart=$VENV_PY examples/minion.py
+ExecStart=$VENV_PY $SRC_DIR/examples/minion.py
 # minion.py retries the API 10x/3s per entry before giving up; leave room.
 TimeoutStartSec=300
 # No Restart=. The panel holds its last image, so a failed run is a stale
@@ -469,10 +529,48 @@ systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
 ok "${SERVICE_NAME}.service installed and enabled (runs at every boot)"
 
+# A device set up by hand already has an `@reboot … minion.py` crontab entry.
+# Left in place it fires alongside the unit: two processes, both grabbing the
+# same GPIO pins (the loser dies with GPIOPinInUse) and both racing to shut the
+# Pi down. Only the owner should decide which scheduler wins, so: detect, warn,
+# and hand over the exact command — never edit someone's crontab for them.
+if command -v crontab >/dev/null 2>&1; then
+  CRON_HIT="$(crontab -l -u "$SVC_USER" 2>/dev/null | grep -nE '^[^#]*minion\.py' || true)"
+  if [ -n "$CRON_HIT" ]; then
+    warn "'$SVC_USER' still has a crontab entry running minion.py:"
+    printf '%s\n' "$CRON_HIT" | sed 's/^/       /' >&2
+    warn "  it will run at boot TOO — remove it so only the unit fires:"
+    warn "    crontab -u $SVC_USER -e     # delete or comment out that line"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # 8. Preflight checks
 # ---------------------------------------------------------------------------
 step "[8/8] Preflight checks"
+
+# Can the unit resolve the vendored driver? Read the values back out of the UNIT
+# FILE rather than from this script's variables — the artifact on disk is what
+# boots, so that is what should be tested.
+#
+# `python <script>` sets sys.path[0] to the SCRIPT's directory (examples/), not
+# the working directory, so a unit with WorkingDirectory but no PYTHONPATH dies
+# with "No module named 'lib'". Assigning sys.path[0] here reproduces that
+# exactly without needing to write a probe file into the checkout.
+unit_exec="$(sed -n 's/^ExecStart=//p' "$UNIT_PATH")"
+unit_py="${unit_exec%% *}"; unit_script="${unit_exec#* }"
+unit_wd="$(sed -n 's/^WorkingDirectory=//p' "$UNIT_PATH")"
+unit_pp="$(sed -n 's/^Environment=PYTHONPATH=//p' "$UNIT_PATH")"
+if ( cd "$unit_wd" && as_svc env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$unit_pp" "$unit_py" -c \
+     'import sys, os, importlib.util as u
+sys.path[0] = os.path.dirname(os.path.abspath(sys.argv[1]))
+sys.exit(0 if u.find_spec("lib.waveshare_epd.epd2in13_V4") else 1)' \
+     "$unit_script" >/dev/null 2>&1 ); then
+  ok "the unit resolves lib.waveshare_epd (PYTHONPATH=$unit_pp)"
+else
+  warn "the unit CANNOT import lib.waveshare_epd — it will die with \"No module named 'lib'\"."
+  warn "  the repo root must be on PYTHONPATH; WorkingDirectory alone is not enough."
+fi
 
 # Font — Pillow must be able to load it, or the app dies at import time.
 if as_svc "$VENV_PY" -c \
@@ -485,7 +583,7 @@ fi
 # GPIO stack — importing the modules is safe; instantiating the driver is not
 # (epdconfig grabs the GPIO pins the moment it is imported), so stop at imports.
 if [ "$IS_PI" -eq 1 ]; then
-  if as_svc "$VENV_PY" -c 'import spidev, gpiozero' >/dev/null 2>&1; then
+  if as_svc env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SRC_DIR" "$VENV_PY" -c 'import spidev, gpiozero' >/dev/null 2>&1; then
     ok "spidev + gpiozero import"
   else
     warn "spidev/gpiozero do not import — the display will fail to initialise."
