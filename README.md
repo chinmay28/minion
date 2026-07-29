@@ -176,6 +176,7 @@ answering and warns if it is not.
 | `MINION_API_BASE_URL` | the original device's tailnet URL | Seeded into the config on **first install only** |
 | `MINION_LOG_FILE` | `<service user's home>/minion.log` | Seeded into the config on first install only |
 | `ENABLE_SPI` | `auto` | `never` to leave the SPI interface alone |
+| `MINION_PISUGAR_WAIT` | `30` | Seconds to wait at boot for PiSugar (`0` disables); seeded into the config |
 | `MINION_RUN_NOW` | `0` | `1` to run one refresh after installing — **may power the machine off** |
 
 Notes on how it behaves:
@@ -192,6 +193,15 @@ Notes on how it behaves:
   installer tells you and prints the command; removing it is your call.
 - **A now-unused `~/minion` checkout is called out** so it doesn't sit there
   looking authoritative while nothing runs it.
+- **The unit waits for PiSugar before running.** systemd starts it much earlier
+  in boot than cron ever did, early enough to lose a race with the PiSugar
+  server. `After=` alone doesn't fix that — it's a no-op against a unit whose
+  name doesn't match, and for a `Type=simple` service it only means the process
+  forked, not that it's listening. So the installer also writes
+  `/opt/minion/bin/wait-for-pisugar` and runs it as `ExecStartPre`: it polls the
+  PiSugar port for up to `MINION_PISUGAR_WAIT` seconds, releases the moment it
+  answers, and always exits 0 so a missing PiSugar degrades instead of blocking
+  boot.
 - **The config file is written once and never rewritten.** It is the only state
   Minion has, and it is what makes one device differ from another; clobbering it
   on upgrade would silently repoint your Pi at somebody else's API.
@@ -217,6 +227,7 @@ into `/etc/minion.env`, which `minion.service` loads as an `EnvironmentFile`:
 | `MINION_API_BASE_URL` | `http://nakedpi.stingray-boga.ts.net:9999/api/entries` | Home API base URL |
 | `MINION_PISUGAR_HOST` | `127.0.0.1` | PiSugar server host |
 | `MINION_PISUGAR_PORT` | `8423` | PiSugar server port |
+| `MINION_PISUGAR_WAIT` | `30` | Seconds the boot service waits for PiSugar to start listening (`0` disables). Read by the unit's readiness gate, not by `minion.py`. |
 
 The quote ticker symbols are defined as `SYM_*` constants near the top of
 `minion.py`. Note the renderer's two-column layout is fixed to the current set
@@ -323,7 +334,13 @@ when debugging a run.
   API is down the Pi stays on by design. Confirm `minion-auto-shutdown` returns
   a truthy `value.data`.
 - **Battery shows `N/A`** — the PiSugar server isn't reachable on
-  `MINION_PISUGAR_HOST:PORT`, or `nc` (netcat) isn't installed.
+  `MINION_PISUGAR_HOST:PORT`, or `nc` (netcat) isn't installed. Note the RTC
+  alarm goes through the *same* socket, so an `N/A` battery usually means the
+  wake-up alarm was not set either — check `RTC response:` in the log, and treat
+  that as the real problem. If this started after switching from an `@reboot`
+  crontab to `minion.service`, it is a boot race: the unit starts far earlier
+  than cron did. Re-run `quickstart.sh` to install the readiness gate, or raise
+  `MINION_PISUGAR_WAIT`. `journalctl -u minion -b` shows the gate giving up.
 - **Display init fails** — verify SPI is enabled and the HAT is seated; the GPIO
   Python packages must be installed on the Pi.
 
