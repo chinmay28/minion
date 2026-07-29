@@ -78,6 +78,12 @@ There is **no test suite** and the hardware can't be exercised in CI:
 - **The installer must never run `minion.py`** as a self-check (a run sets an
   RTC alarm and can power the machine off). Its verification is a compile +
   import check as the service user; hardware-side gaps warn, they don't fail.
+- **`minion.service` starts earlier in boot than the `@reboot` crontab it
+  replaced**, early enough to beat the PiSugar server to its socket — which
+  reads as a cosmetic `N/A` battery but also silently drops the RTC wake-up
+  alarm. `After=` does not fix this (no-op against a wrongly-named unit; for
+  `Type=simple` it only means the process forked). The `ExecStartPre` readiness
+  gate is the guarantee — keep it, and keep it exiting 0.
 - **Ticker symbols** are `SYM_*` constants. They are the home API's keys; the
   on-screen label and the key are usually the same string but need not be —
   e.g. the quote fetched under key `P` is displayed as `PSTG`.
