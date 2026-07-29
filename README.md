@@ -34,9 +34,10 @@ schedules an RTC alarm and — if the server's auto-shutdown flag is set — pow
 the machine off, so an installer that "verified itself" by running the app would
 shut down the Pi you are typing on. To do it anyway, pass `MINION_RUN_NOW=1`.
 
-Re-run the same command any time to upgrade. It is idempotent, it never
-overwrites `/etc/minion.env`, and a checkout that fails its compile/import check
-is rolled back to the previous commit. See
+The code is cloned to `/opt/minion/src` and the installer keeps it there: re-run
+the same command any time and it fetches the latest `MINION_REF` into that
+checkout. It is idempotent, it never overwrites `/etc/minion.env`, and a commit
+that fails its compile/import check is rolled back. See
 [Installer options](#installer-options) for the full list of variables, or
 [Setup](#setup) to do it by hand.
 
@@ -169,8 +170,8 @@ answering and warns if it is not.
 | `MINION_REPO` | `https://github.com/chinmay28/minion.git` | Source to clone |
 | `MINION_REF` | `master` | Branch, tag, or commit to deploy |
 | `MINION_USER` | the invoking `sudo` user, else `minion` | User the service runs as |
-| `MINION_SRC_DIR` | `~/minion` if it exists, else `$PREFIX/src` | Checkout to install from |
-| `MINION_PREFIX` | `/opt/minion` | Install prefix (venv → `$PREFIX/venv`; clone target if adopting nothing) |
+| `MINION_SRC_DIR` | unset | Deploy a checkout *you* maintain instead of the managed clone |
+| `MINION_PREFIX` | `/opt/minion` | Install prefix (source → `$PREFIX/src`, venv → `$PREFIX/venv`) |
 | `MINION_CONFIG` | `/etc/minion.env` | Env file the unit reads |
 | `MINION_API_BASE_URL` | the original device's tailnet URL | Seeded into the config on **first install only** |
 | `MINION_LOG_FILE` | `<service user's home>/minion.log` | Seeded into the config on first install only |
@@ -179,15 +180,18 @@ answering and warns if it is not.
 
 Notes on how it behaves:
 
-- **An existing checkout is adopted, never duplicated.** If the repo is already
-  at `~/minion` — or you run the script from inside a checkout — that tree is
-  what gets installed. Cloning a second copy under `/opt` would leave two
-  installs racing at boot. Adopted trees are only ever fast-forwarded, never
-  when dirty, and never rolled back; they belong to you, not to the installer.
+- **The deployed code lives at `/opt/minion/src`, and the installer owns it.**
+  Every run fetches `MINION_REF` into that clone, so the running commit is always
+  known and "re-run to upgrade" genuinely upgrades. A checkout in a home
+  directory is whatever state it was left in, which is why it isn't used by
+  default — set `MINION_SRC_DIR` to deploy one deliberately. Such a tree is
+  yours: only fast-forwarded, never when dirty, never reset, never chowned.
 - **A leftover `@reboot` crontab entry is detected and reported.** If you set
-  this device up by hand, that line still fires at boot alongside the unit — two
-  processes fighting over the same GPIO pins. The installer tells you; removing
-  it is your call.
+  this device up by hand, that line still fires at boot alongside the unit — and
+  from its *own* checkout, so the two would be running different commits. The
+  installer tells you and prints the command; removing it is your call.
+- **A now-unused `~/minion` checkout is called out** so it doesn't sit there
+  looking authoritative while nothing runs it.
 - **The config file is written once and never rewritten.** It is the only state
   Minion has, and it is what makes one device differ from another; clobbering it
   on upgrade would silently repoint your Pi at somebody else's API.
@@ -295,8 +299,9 @@ By hand, any boot hook works — a unit of your own or cron `@reboot`. Note the
 @reboot cd ~/minion/ && export PYTHONPATH=$(pwd) && python examples/minion.py
 ```
 
-If you switch to the systemd unit, **remove the crontab line** — otherwise both
-fire at boot and race each other for the GPIO pins.
+If you switch to the systemd unit, **remove the crontab line.** Otherwise both
+fire at boot, racing for the same GPIO pins — and from different checkouts, since
+quickstart deploys `/opt/minion/src` while that line runs `~/minion`.
 
 > **Heads up:** running `minion.py` will (by default) schedule an RTC alarm and
 > attempt to shut the machine down. Don't run it casually on a Pi you want to

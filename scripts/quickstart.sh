@@ -24,14 +24,17 @@
 #     SPI device node, Home API reachability, PiSugar socket, sudo rule. Missing
 #     hardware-side pieces WARN rather than fail: this same script is useful on
 #     a plain Debian box for staging, where there is no panel to talk to.
-#   * An existing checkout is ADOPTED, never duplicated. A device set up by hand
-#     has the repo at ~/minion and an `@reboot` crontab pointing at it; cloning a
-#     second copy under /opt would leave two installs racing at boot. The old
-#     crontab entry is detected and reported (but never edited — that call is
-#     the owner's).
+#   * The deployed code is a checkout this script OWNS, at $PREFIX/src. Every run
+#     fetches $MINION_REF into it, so the running commit is always known and
+#     "re-run to upgrade" means something. A hand-maintained checkout in a home
+#     directory is whatever state it was left in, which is why it is not used by
+#     default — point MINION_SRC_DIR at one to override.
+#   * A leftover `@reboot … minion.py` crontab entry is detected and reported: it
+#     fires alongside the unit, from its own checkout, so the two would run
+#     different commits. It is never edited — that call is the owner's.
 #   * Idempotent. Re-run any time to upgrade in place. If the new checkout fails
-#     its compile/import check, it is ROLLED BACK to the previous commit. Adopted
-#     trees are only ever fast-forwarded, and never when they are dirty.
+#     its compile/import check, it is ROLLED BACK to the previous commit. A
+#     MINION_SRC_DIR tree is only fast-forwarded, never when dirty, never reset.
 #
 # Configure via environment variables (all optional):
 #
@@ -39,9 +42,9 @@
 #   MINION_REF            branch/tag/commit     (default: master)
 #   MINION_USER           user the service runs as
 #                                               (default: the invoking sudo user, else 'minion')
-#   MINION_SRC_DIR        use this checkout     (default: ~/minion or a checkout you run this
-#                                               from, if either exists; else clone to $PREFIX/src)
-#   MINION_PREFIX         install prefix        (default: /opt/minion; venv -> $PREFIX/venv)
+#   MINION_SRC_DIR        deploy YOUR checkout  (default: unset — clone and manage $PREFIX/src)
+#   MINION_PREFIX         install prefix        (default: /opt/minion; source -> $PREFIX/src,
+#                                               venv -> $PREFIX/venv)
 #   MINION_CONFIG         env file for the unit (default: /etc/minion.env)
 #   MINION_API_BASE_URL   Home API base URL     (seeded into the config on FIRST install only)
 #   MINION_LOG_FILE       log path              (default: <service user's home>/minion.log)
@@ -114,30 +117,20 @@ grep -qi raspberry /proc/cpuinfo 2>/dev/null && IS_PI=1
 
 is_minion_tree() { [ -f "$1/examples/minion.py" ] && [ -d "$1/lib/waveshare_epd" ]; }
 
-# Where the code lives. A device that already runs Minion has the repo checked
-# out in the user's home and a crontab pointing at it — cloning a second copy
-# under $PREFIX would leave two installs racing each other at boot. So: adopt an
-# existing checkout wherever we find one, and only clone when there is none.
-# ADOPTED=1 marks a tree the user maintains, which we treat conservatively.
-SRC_DIR=""
+# Where the code lives. The default is a checkout this script owns at
+# $PREFIX/src: every run fetches $MINION_REF into it, so "re-run to upgrade"
+# actually means something and the deployed commit is always known. A checkout
+# sitting in someone's home is not that — it is whatever state it was left in.
+#
+# MINION_SRC_DIR opts out and points the unit at a tree you maintain yourself
+# (a dev checkout, an air-gapped copy). ADOPTED=1 marks that case: we never
+# chown it, reset it, or roll it back.
+SRC_DIR="$PREFIX/src"
 ADOPTED=0
 if [ -n "${MINION_SRC_DIR:-}" ]; then
   is_minion_tree "$MINION_SRC_DIR" \
     || die "MINION_SRC_DIR=$MINION_SRC_DIR is not a Minion checkout (no examples/minion.py + lib/waveshare_epd)."
   SRC_DIR="$MINION_SRC_DIR"; ADOPTED=1
-else
-  # Running from inside a checkout (sudo ./scripts/quickstart.sh, or a piped
-  # install launched from the repo root)? Use that one.
-  SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd)"
-  if top="$(git -C "$SELF_DIR" rev-parse --show-toplevel 2>/dev/null)" && is_minion_tree "$top"; then
-    SRC_DIR="$top"; ADOPTED=1
-  elif is_minion_tree "$SVC_HOME/minion"; then
-    SRC_DIR="$SVC_HOME/minion"; ADOPTED=1        # the existing-device layout
-  elif is_minion_tree "$PREFIX/src"; then
-    SRC_DIR="$PREFIX/src"                        # a previous quickstart install
-  else
-    SRC_DIR="$PREFIX/src"                        # nothing yet — clone here
-  fi
 fi
 
 log "Minion quick start"
@@ -145,7 +138,7 @@ printf '  %-10s %s\n' "source"  "$SRC_DIR"
 printf '  %-10s %s\n' "venv"    "$VENV_DIR"
 printf '  %-10s %s\n' "config"  "$CONFIG_FILE"
 printf '  %-10s %s\n' "service" "${SERVICE_NAME}.service (oneshot at boot, user: $SVC_USER)"
-[ "$ADOPTED" -eq 1 ] && printf '  %-10s %s\n' "" "(existing checkout — adopted, not re-cloned)"
+[ "$ADOPTED" -eq 1 ] && printf '  %-12s %s\n' "" "(MINION_SRC_DIR — your tree; left as you keep it)"
 [ "$IS_PI" -eq 1 ] || printf '  %-10s %s\n' "platform" "not a Raspberry Pi — display/PiSugar steps will be skipped"
 
 # Run git/python as the service user so the tree stays owned by them (git
@@ -268,7 +261,7 @@ if [ "$ADOPTED" -eq 1 ]; then
   # This tree belongs to the user, not to us: never reset a branch under them.
   # Fast-forward only, and only when there is nothing to lose.
   PREV_SHA="$(as_svc git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || true)"
-  log "adopting the existing checkout (not cloning a second copy)"
+  log "using your own checkout (MINION_SRC_DIR) — not managed by this script"
   if [ ! -d "$SRC_DIR/.git" ]; then
     ok "source at $SRC_DIR (not a git checkout — left as is)"
   elif [ -n "$(as_svc git -C "$SRC_DIR" status --porcelain 2>/dev/null)" ]; then
@@ -279,22 +272,31 @@ if [ "$ADOPTED" -eq 1 ]; then
     warn "could not fast-forward $SRC_DIR (no upstream, or diverged) — leaving it as is."
   fi
 elif [ -d "$SRC_DIR/.git" ]; then
-  PREV_SHA="$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || true)"
+  # Every git call here goes through as_svc. The tree is owned by $SVC_USER, and
+  # git refuses to touch a repo owned by someone else ("dubious ownership") — as
+  # root this returns nothing, PREV_SHA ends up empty, and the rollback below is
+  # silently skipped exactly when it is needed.
+  PREV_SHA="$(as_svc git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || true)"
   log "updating to $MINION_REF…"
   as_svc git -C "$SRC_DIR" fetch --prune origin "$MINION_REF" \
     || die "git fetch failed — check connectivity to $MINION_REPO"
   as_svc git -C "$SRC_DIR" checkout -q -B deploy FETCH_HEAD
-  ok "updated $( [ -n "$PREV_SHA" ] && echo "${PREV_SHA:0:12} → " )$(git -C "$SRC_DIR" rev-parse --short HEAD)"
+  ok "updated $( [ -n "$PREV_SHA" ] && echo "${PREV_SHA:0:12} → " )$(as_svc git -C "$SRC_DIR" rev-parse --short HEAD)"
 else
   log "cloning $MINION_REPO (ref: $MINION_REF)…"
+  # Clone as the service user, like every other git call, so the tree is theirs
+  # from the start. $PREFIX has to be handed over first — they cannot mkdir in
+  # /opt. (Cloning as root and chowning afterwards also works over https, but
+  # breaks for a local-path origin the service user owns.)
   mkdir -p "$PREFIX"
-  git clone --branch "$MINION_REF" "$MINION_REPO" "$SRC_DIR" \
-    || git clone "$MINION_REPO" "$SRC_DIR" \
+  chown "$SVC_USER":"$SVC_GROUP" "$PREFIX" 2>/dev/null || true
+  as_svc git clone --branch "$MINION_REF" "$MINION_REPO" "$SRC_DIR" \
+    || as_svc git clone "$MINION_REPO" "$SRC_DIR" \
     || die "clone failed — check connectivity to $MINION_REPO"
   ok "cloned to $SRC_DIR"
 fi
-# Only take ownership of trees we manage; an adopted checkout in someone's home
-# already belongs to them and is none of our business.
+# Only take ownership of trees we manage; a MINION_SRC_DIR checkout belongs to
+# whoever maintains it and is none of our business.
 [ "$ADOPTED" -eq 1 ] || chown -R "$SVC_USER":"$SVC_GROUP" "$PREFIX" 2>/dev/null || true
 is_minion_tree "$SRC_DIR" || die "no examples/minion.py + lib/waveshare_epd at $SRC_DIR — checkout failed?"
 
@@ -530,18 +532,29 @@ systemctl enable "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
 ok "${SERVICE_NAME}.service installed and enabled (runs at every boot)"
 
 # A device set up by hand already has an `@reboot … minion.py` crontab entry.
-# Left in place it fires alongside the unit: two processes, both grabbing the
-# same GPIO pins (the loser dies with GPIOPinInUse) and both racing to shut the
-# Pi down. Only the owner should decide which scheduler wins, so: detect, warn,
-# and hand over the exact command — never edit someone's crontab for them.
+# Left in place it fires alongside the unit: two processes grabbing the same GPIO
+# pins (the loser dies with GPIOPinInUse) and both racing to shut the Pi down.
+# Worse, that entry points at its own checkout — usually ~/minion — while the
+# unit runs $SRC_DIR, so the two would be executing DIFFERENT commits. Only the
+# owner should decide which scheduler wins: detect, warn, hand over the command.
+# Never edit someone's crontab for them.
 if command -v crontab >/dev/null 2>&1; then
   CRON_HIT="$(crontab -l -u "$SVC_USER" 2>/dev/null | grep -nE '^[^#]*minion\.py' || true)"
   if [ -n "$CRON_HIT" ]; then
     warn "'$SVC_USER' still has a crontab entry running minion.py:"
     printf '%s\n' "$CRON_HIT" | sed 's/^/       /' >&2
-    warn "  it will run at boot TOO — remove it so only the unit fires:"
+    warn "  it fires at boot TOO, from its own checkout — not $SRC_DIR."
+    warn "  Remove it so only the unit runs, and only the managed checkout is deployed:"
     warn "    crontab -u $SVC_USER -e     # delete or comment out that line"
   fi
+fi
+
+# The checkout that crontab entry used is now superseded. Say so plainly —
+# otherwise it sits there looking authoritative while nothing runs it.
+if [ "$ADOPTED" -eq 0 ] && [ "$SVC_HOME/minion" != "$SRC_DIR" ] && is_minion_tree "$SVC_HOME/minion"; then
+  warn "$SVC_HOME/minion is no longer used — the unit deploys $SRC_DIR, which this script keeps"
+  warn "  up to date. Keep it for local work, delete it, or pass MINION_SRC_DIR=$SVC_HOME/minion"
+  warn "  to deploy it instead."
 fi
 
 # ---------------------------------------------------------------------------
