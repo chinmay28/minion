@@ -2,7 +2,7 @@
 #
 # Minion — Raspberry Pi quick-start installer (Raspberry Pi OS / Debian).
 #
-# One command, run as root, installs Minion as a systemd boot service:
+# One command, run as root, installs Minion as an `@reboot` crontab entry:
 #
 #   curl -fsSL https://raw.githubusercontent.com/chinmay28/minion/master/scripts/quickstart.sh | sudo bash
 #
@@ -11,8 +11,13 @@
 # schedules the next wake-up, and powers the Pi back off. The installer is
 # shaped around that, which is why it differs from a typical service installer:
 #
-#   * The unit is Type=oneshot with no Restart=. A failed run must NOT loop —
-#     the panel simply keeps the image it already holds until the next wake.
+#   * The boot hook is cron's `@reboot`, not a systemd unit. cron starts late in
+#     boot, which is exactly what this workload wants: PiSugar is already
+#     listening, so the battery reads and — far more importantly — the RTC
+#     wake-up alarm land. One run per boot, no retry: a failed run must NOT
+#     loop, the panel simply keeps the image it already holds until the next
+#     wake. Any systemd unit a previous version of this script installed is
+#     REMOVED, so exactly one scheduler owns the boot.
 #   * NOTHING IS RUN AT INSTALL TIME by default. Starting minion.py sets an RTC
 #     alarm and (if the server's auto-shutdown flag is set) powers the machine
 #     off. An installer that "verified" itself by running the app would shut
@@ -29,9 +34,10 @@
 #     "re-run to upgrade" means something. A hand-maintained checkout in a home
 #     directory is whatever state it was left in, which is why it is not used by
 #     default — point MINION_SRC_DIR at one to override.
-#   * A leftover `@reboot … minion.py` crontab entry is detected and reported: it
-#     fires alongside the unit, from its own checkout, so the two would run
-#     different commits. It is never edited — that call is the owner's.
+#   * The crontab entry is written between BEGIN/END markers and rewritten on
+#     every run, so upgrading never stacks duplicates. Any OTHER line launching
+#     minion (a hand-rolled `@reboot cd ~/minion && …`) is commented out, not
+#     deleted, and the previous crontab is backed up to $PREFIX/backups first.
 #   * Idempotent. Re-run any time to upgrade in place. If the new checkout fails
 #     its compile/import check, it is ROLLED BACK to the previous commit. A
 #     MINION_SRC_DIR tree is only fast-forwarded, never when dirty, never reset.
@@ -40,12 +46,12 @@
 #
 #   MINION_REPO           git URL to clone      (default: https://github.com/chinmay28/minion.git)
 #   MINION_REF            branch/tag/commit     (default: master)
-#   MINION_USER           user the service runs as
-#                                               (default: the invoking sudo user, else 'minion')
+#   MINION_USER           user whose crontab gets the @reboot entry, and who the
+#                         run happens as        (default: the invoking sudo user, else 'minion')
 #   MINION_SRC_DIR        deploy YOUR checkout  (default: unset — clone and manage $PREFIX/src)
 #   MINION_PREFIX         install prefix        (default: /opt/minion; source -> $PREFIX/src,
 #                                               venv -> $PREFIX/venv)
-#   MINION_CONFIG         env file for the unit (default: /etc/minion.env)
+#   MINION_CONFIG         env file the run loads (default: /etc/minion.env)
 #   MINION_API_BASE_URL   Home API base URL     (seeded into the config on FIRST install only)
 #   MINION_LOG_FILE       log path              (default: <service user's home>/minion.log)
 #   MINION_PISUGAR_WAIT   seconds to wait at boot for PiSugar to accept connections
@@ -73,12 +79,12 @@ step() { printf '\n%s%s%s\n' "$C_DIM" "$*" "$C_OFF"; }
 WARNINGS=0
 
 # ---------------------------------------------------------------------------
-# Must be root (system service, SPI config, sudoers rule)
+# Must be root (installs under /opt, edits another user's crontab, SPI config,
+# sudoers rule, and removes any system unit an earlier version left behind)
 # ---------------------------------------------------------------------------
 if [ "$(id -u)" -ne 0 ]; then
   die "Run as root: curl -fsSL .../quickstart.sh | sudo bash   (or: sudo ./scripts/quickstart.sh)"
 fi
-command -v systemctl >/dev/null 2>&1 || die "systemd is required (no systemctl found)."
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -109,8 +115,19 @@ SVC_HOME="$(getent passwd "$SVC_USER" 2>/dev/null | cut -d: -f6)"
 VENV_DIR="$PREFIX/venv"
 VENV_PY="$VENV_DIR/bin/python"
 SERVICE_NAME="minion"
+# Kept only so the systemd unit an earlier version of this script installed can
+# be found and torn down; nothing here writes it any more.
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 SUDOERS_PATH="/etc/sudoers.d/minion"
+RUNNER="$PREFIX/bin/minion-run"
+WAIT_HELPER="$PREFIX/bin/wait-for-pisugar"
+# Marker lines around the managed crontab block. ASCII only — a crontab is not
+# the place to find out how the cron daemon feels about UTF-8. The block is
+# matched on the "# BEGIN minion" prefix alone, so the rest of the text can be
+# reworded later without orphaning the block on already-deployed devices.
+CRON_BEGIN_PREFIX="# BEGIN minion"
+CRON_BEGIN="$CRON_BEGIN_PREFIX - managed by quickstart.sh, rewritten on every run"
+CRON_END="# END minion"
 
 # Is this actually a Pi? The Waveshare driver picks its GPIO backend by grepping
 # /proc/cpuinfo, so anything else is a staging install: set it up, warn, move on.
@@ -124,7 +141,7 @@ is_minion_tree() { [ -f "$1/examples/minion.py" ] && [ -d "$1/lib/waveshare_epd"
 # actually means something and the deployed commit is always known. A checkout
 # sitting in someone's home is not that — it is whatever state it was left in.
 #
-# MINION_SRC_DIR opts out and points the unit at a tree you maintain yourself
+# MINION_SRC_DIR opts out and points the boot run at a tree you maintain yourself
 # (a dev checkout, an air-gapped copy). ADOPTED=1 marks that case: we never
 # chown it, reset it, or roll it back.
 SRC_DIR="$PREFIX/src"
@@ -139,13 +156,13 @@ log "Minion quick start"
 printf '  %-10s %s\n' "source"  "$SRC_DIR"
 printf '  %-10s %s\n' "venv"    "$VENV_DIR"
 printf '  %-10s %s\n' "config"  "$CONFIG_FILE"
-printf '  %-10s %s\n' "service" "${SERVICE_NAME}.service (oneshot at boot, user: $SVC_USER)"
+printf '  %-10s %s\n' "boot"    "@reboot crontab entry (user: $SVC_USER)"
 [ "$ADOPTED" -eq 1 ] && printf '  %-12s %s\n' "" "(MINION_SRC_DIR — your tree; left as you keep it)"
 [ "$IS_PI" -eq 1 ] || printf '  %-10s %s\n' "platform" "not a Raspberry Pi — display/PiSugar steps will be skipped"
 
 # Run git/python as the service user so the tree stays owned by them (git
 # refuses to read a repo owned by someone else) and so the checks see the same
-# environment the unit will. HOME is set explicitly: runuser keeps the caller's
+# environment the boot run will. HOME is set explicitly: runuser keeps the caller's
 # environment, and leaving HOME=/root makes git and pip read root's config.
 as_svc() {
   if id -u "$SVC_USER" >/dev/null 2>&1; then
@@ -160,8 +177,10 @@ as_svc() {
 }
 
 # Detect an upgrade BEFORE anything changes, so we know whether to roll back.
+# A leftover unit file counts: a device installed by the systemd-era version of
+# this script is an upgrade even though it has no crontab entry yet.
 UPGRADE=0
-{ [ -f "$UNIT_PATH" ] || [ -f "$CONFIG_FILE" ]; } && UPGRADE=1
+{ [ -f "$UNIT_PATH" ] || [ -f "$CONFIG_FILE" ] || [ -x "$RUNNER" ]; } && UPGRADE=1
 
 # ---------------------------------------------------------------------------
 # 1. Prerequisites
@@ -194,6 +213,8 @@ ensure_apt_optional() {
 ensure_pkg git
 ensure_pkg curl
 ensure_pkg python3
+# cron IS the scheduler now — without it nothing runs at boot at all.
+ensure_pkg crontab cron
 # The renderer's font, and netcat — minion.py talks to PiSugar by piping a line
 # into `nc`, so without it the battery reading and the RTC alarm both fail.
 ensure_apt_optional fonts-dejavu-core
@@ -211,7 +232,7 @@ if [ "$IS_PI" -eq 1 ]; then
   ensure_apt_optional python3-gpiozero
   ensure_apt_optional python3-lgpio
 fi
-ok "git $(git --version | awk '{print $3}'), $(python3 --version)"
+ok "git $(git --version | awk '{print $3}'), $(python3 --version), crontab present"
 command -v nc >/dev/null 2>&1 || warn "netcat ('nc') not found — battery reads and RTC alarms will fail."
 
 # ---------------------------------------------------------------------------
@@ -303,7 +324,7 @@ fi
 is_minion_tree "$SRC_DIR" || die "no examples/minion.py + lib/waveshare_epd at $SRC_DIR — checkout failed?"
 
 # The service user has to be able to reach the code at boot. A checkout under a
-# 0700 home is readable by its owner, but if the unit ever runs as someone else
+# 0700 home is readable by its owner, but if the run ever happens as someone else
 # this is the failure that shows up as a mysterious ExecStart=203/EXEC.
 as_svc test -r "$SRC_DIR/examples/minion.py" \
   || warn "'$SVC_USER' cannot read $SRC_DIR/examples/minion.py — check the permissions on $SRC_DIR."
@@ -356,7 +377,7 @@ verify_build() {
   [ "$rc" -eq 0 ] || return 1
   as_svc "$VENV_PY" -c 'from PIL import Image, ImageDraw, ImageFont; import requests' \
     >"$BUILD_LOG" 2>&1 || return 1
-  # Resolve the vendored driver exactly as the unit will — same user, same
+  # Resolve the vendored driver exactly as the boot run will — same user, same
   # PYTHONPATH. find_spec stops at the parent packages (both __init__.py are
   # empty), so this proves the import path without importing epdconfig, which
   # would seize the GPIO pins the moment it loaded.
@@ -412,10 +433,12 @@ else
   api_url="${MINION_API_BASE_URL:-http://nakedpi.stingray-boga.ts.net:9999/api/entries}"
   log_file="${MINION_LOG_FILE:-$SVC_HOME/minion.log}"
   cat > "$CONFIG_FILE" <<CONF
-# Minion configuration — read by ${SERVICE_NAME}.service as an EnvironmentFile.
-# KEY=value only (no 'export', no shell expansion). Re-running quickstart.sh
-# never overwrites this file. Edits take effect on the next boot — there is no
-# long-running process to restart.
+# Minion configuration — loaded by $RUNNER, which the @reboot
+# crontab entry runs. KEY=value only (no 'export', no shell expansion): the
+# runner parses this file line by line rather than sourcing it, so a stray line
+# cannot execute anything. Re-running quickstart.sh never overwrites this file.
+# Edits take effect on the next boot — there is no long-running process to
+# restart.
 
 # Home API base URL — already includes the /api/entries path.
 # https://github.com/chinmay28/HomeAPI
@@ -432,8 +455,9 @@ MINION_PISUGAR_HOST=127.0.0.1
 MINION_PISUGAR_PORT=8423
 
 # Seconds to wait at boot for PiSugar to start accepting connections before
-# running. systemd starts this unit earlier than cron ever did, so without the
-# wait the battery reads N/A and the RTC alarm is never set. 0 disables it.
+# running. cron fires late enough that this is usually insurance, but if PiSugar
+# is not up the battery reads N/A and — much worse — the RTC wake-up alarm is
+# never set, so the Pi never comes back. 0 disables the wait.
 MINION_PISUGAR_WAIT=30
 CONF
   chmod 644 "$CONFIG_FILE"
@@ -497,27 +521,22 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. systemd boot service
+# 7. Boot entry: @reboot crontab
 # ---------------------------------------------------------------------------
-step "[7/8] systemd boot service"
+step "[7/8] Boot entry (@reboot crontab)"
 
 # --- PiSugar readiness gate -------------------------------------------------
-# systemd starts this unit early in boot. The hand-rolled `@reboot` crontab this
-# replaces never raced PiSugar because cron itself starts late — the unit does,
-# and loses: PiSugar is not listening yet, so the battery reads N/A and, far
-# worse, `rtc_alarm_set` goes nowhere and the Pi never wakes up again.
+# cron starts late in boot, so PiSugar is normally listening by the time this
+# runs — but "normally" is doing real work there, and the failure is expensive:
+# if PiSugar is not up, the battery reads N/A and, far worse, `rtc_alarm_set`
+# goes nowhere and the Pi never wakes up again. So the run begins with a short,
+# bounded wait for the port to accept a connection.
 #
-# After= alone does not fix it. It is a no-op against a unit that does not exist
-# (the name varies by install), and for a Type=simple service it only guarantees
-# the process forked, not that it bound its socket. So the real guarantee is a
-# short, bounded wait for the port to accept a connection.
-#
-# This lives in a generated script rather than an inline `sh -c` because systemd
-# expands $VAR in Exec lines itself and has no ${VAR:-default} syntax — a shell
-# loop written inline would have its defaults and loop variable mangled. In a
-# file, none of that applies, and MINION_PISUGAR_* still arrive from
-# EnvironmentFile, so editing $CONFIG_FILE keeps the gate and the app in sync.
-WAIT_HELPER="$PREFIX/bin/wait-for-pisugar"
+# It lives in its own file rather than inline in the crontab line because a
+# crontab is a single-line-per-job format with its own `%` escaping — a shell
+# loop written there would be unreadable and easy to break. In a file, none of
+# that applies, and MINION_PISUGAR_* still arrive from $CONFIG_FILE, so editing
+# the config keeps the gate and the app in sync.
 install -d -o "$SVC_USER" -g "$SVC_GROUP" -m 755 "$PREFIX/bin"
 cat > "$WAIT_HELPER" <<HELPER
 #!/bin/sh
@@ -548,83 +567,161 @@ chmod 755 "$WAIT_HELPER"
 chown "$SVC_USER":"$SVC_GROUP" "$WAIT_HELPER" 2>/dev/null || true
 ok "readiness gate installed ($WAIT_HELPER)"
 
-# Order against PiSugar's real unit name where it can be found, so systemd does
-# the right thing on its own and the gate above is only insurance.
-pisugar_units="$(systemctl list-unit-files --no-legend --type=service 2>/dev/null | awk '{print $1}' | grep -i pisugar || true)"
-PISUGAR_UNIT="$(printf '%s\n' "$pisugar_units" | grep -i server | head -n1 || true)"
-[ -n "$PISUGAR_UNIT" ] || PISUGAR_UNIT="$(printf '%s\n' "$pisugar_units" | head -n1 || true)"
-if [ -n "$PISUGAR_UNIT" ]; then
-  ok "ordering after '$PISUGAR_UNIT'"
-else
-  PISUGAR_UNIT="pisugar-server.service"
-  [ "$IS_PI" -eq 1 ] && warn "no PiSugar systemd unit found — ordering after '$PISUGAR_UNIT' anyway; the readiness gate is what actually protects the run."
-fi
-
-# Only gate on a Pi: elsewhere there is no PiSugar and the wait would just add
-# its full budget to every boot.
-WAIT_LINE=""
-[ "$IS_PI" -eq 1 ] && WAIT_LINE="ExecStartPre=-$WAIT_HELPER"$'\n'
-
-# Type=oneshot, no Restart=: one refresh per boot, and a failure must not retry
-# in a loop. The PiSugar RTC is the scheduler — the unit just runs at power-on.
+# --- The runner the crontab entry calls -------------------------------------
+# cron gives a job almost nothing: no EnvironmentFile, a bare PATH, and no
+# working directory beyond $HOME. Everything the run needs is therefore set up
+# here, in one file, so the crontab line stays a single readable command.
 #
 # PYTHONPATH is the whole ballgame. minion.py does
 # `from lib.waveshare_epd import epd2in13_V4`, and lib/ is not an installed
-# package. WorkingDirectory alone does NOT make that import work: running
+# package. `cd` alone does NOT make that import work: running
 # `python examples/minion.py` puts examples/ on sys.path[0], not the cwd, so the
 # import fails with ModuleNotFoundError: No module named 'lib'. The repo root has
-# to be on PYTHONPATH — which is exactly what the hand-rolled crontab this
-# replaces did with `export PYTHONPATH=$(pwd)`.
-cat > "$UNIT_PATH" <<UNIT
-[Unit]
-Description=Minion — e-paper market dashboard (one refresh per boot)
-Documentation=https://github.com/chinmay28/minion
-After=network-online.target $PISUGAR_UNIT
-Wants=network-online.target
+# to be on PYTHONPATH — exactly what the hand-rolled crontab line did with
+# `export PYTHONPATH=$(pwd)`.
+#
+# The config is PARSED, not sourced: KEY=value lines only, so a stray line in
+# $CONFIG_FILE cannot execute anything.
+cat > "$RUNNER" <<RUNNER_EOF
+#!/bin/sh
+# Generated by quickstart.sh — do not edit; re-run the installer instead.
+# One refresh of the e-paper panel. Invoked by the '@reboot' crontab entry of
+# $SVC_USER, and safe to run by hand (knowing that a run sets an RTC alarm and
+# may power the machine off).
+set -u
 
-[Service]
-Type=oneshot
-User=$SVC_USER
-Group=$SVC_GROUP
-WorkingDirectory=$SRC_DIR
-Environment=PYTHONPATH=$SRC_DIR
-EnvironmentFile=-$CONFIG_FILE
-${WAIT_LINE}ExecStart=$VENV_PY $SRC_DIR/examples/minion.py
-# minion.py retries the API 10x/3s per entry before giving up; leave room.
-TimeoutStartSec=300
-# No Restart=. The panel holds its last image, so a failed run is a stale
-# dashboard, not an outage — retrying would just burn battery.
+# cron's PATH is minimal; minion.py shells out to nc and /sbin/shutdown.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 
-[Install]
-WantedBy=multi-user.target
-UNIT
-systemctl daemon-reload
-systemctl enable "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
-ok "${SERVICE_NAME}.service installed and enabled (runs at every boot)"
+# Config: KEY=value lines only, parsed rather than sourced.
+if [ -r "$CONFIG_FILE" ]; then
+  while IFS= read -r line || [ -n "\$line" ]; do
+    case "\$line" in
+      ''|'#'*) continue ;;
+      [A-Za-z_]*=*) export "\$line" ;;
+    esac
+  done < "$CONFIG_FILE"
+fi
 
-# A device set up by hand already has an `@reboot … minion.py` crontab entry.
-# Left in place it fires alongside the unit: two processes grabbing the same GPIO
-# pins (the loser dies with GPIOPinInUse) and both racing to shut the Pi down.
-# Worse, that entry points at its own checkout — usually ~/minion — while the
-# unit runs $SRC_DIR, so the two would be executing DIFFERENT commits. Only the
-# owner should decide which scheduler wins: detect, warn, hand over the command.
-# Never edit someone's crontab for them.
-if command -v crontab >/dev/null 2>&1; then
-  CRON_HIT="$(crontab -l -u "$SVC_USER" 2>/dev/null | grep -nE '^[^#]*minion\.py' || true)"
-  if [ -n "$CRON_HIT" ]; then
-    warn "'$SVC_USER' still has a crontab entry running minion.py:"
-    printf '%s\n' "$CRON_HIT" | sed 's/^/       /' >&2
-    warn "  it fires at boot TOO, from its own checkout — not $SRC_DIR."
-    warn "  Remove it so only the unit runs, and only the managed checkout is deployed:"
-    warn "    crontab -u $SVC_USER -e     # delete or comment out that line"
+# Wait for PiSugar, but never block the run on it (the gate always exits 0).
+[ -x "$WAIT_HELPER" ] && "$WAIT_HELPER"
+
+cd "$SRC_DIR" || exit 1
+export PYTHONPATH=$SRC_DIR
+exec $VENV_PY $SRC_DIR/examples/minion.py
+RUNNER_EOF
+chmod 755 "$RUNNER"
+chown "$SVC_USER":"$SVC_GROUP" "$RUNNER" 2>/dev/null || true
+ok "boot runner installed ($RUNNER)"
+
+# --- Remove the systemd unit ------------------------------------------------
+# Earlier versions of this script installed ${SERVICE_NAME}.service. Left
+# enabled it fires at boot alongside the crontab entry: two processes grabbing
+# the same GPIO pins (the loser dies with GPIOPinInUse) and both racing to shut
+# the Pi down. cron is the scheduler now, so the unit goes — completely, not
+# just disabled, or the next `systemctl enable` by muscle memory brings it back.
+if command -v systemctl >/dev/null 2>&1; then
+  if systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "${SERVICE_NAME}.service"; then
+    systemctl disable --now "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+    ok "stopped and disabled ${SERVICE_NAME}.service"
+  fi
+  systemctl reset-failed "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+fi
+UNIT_REMOVED=0
+for stale in "$UNIT_PATH" \
+             "/etc/systemd/system/multi-user.target.wants/${SERVICE_NAME}.service" \
+             "/etc/systemd/system/${SERVICE_NAME}.service.d/override.conf"; do
+  [ -e "$stale" ] || [ -L "$stale" ] || continue
+  rm -f "$stale" && UNIT_REMOVED=1
+done
+rmdir "/etc/systemd/system/${SERVICE_NAME}.service.d" 2>/dev/null || true
+if [ "$UNIT_REMOVED" -eq 1 ]; then
+  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
+  ok "removed the systemd unit — cron is the only boot hook now"
+else
+  ok "no systemd unit to remove"
+fi
+
+# --- Install/refresh the @reboot crontab entry ------------------------------
+# Rewritten between markers on every run, so upgrading never stacks duplicates.
+# Any OTHER minion launcher (the hand-rolled `@reboot cd ~/minion && …` a
+# by-hand setup leaves behind) is commented out rather than deleted: it would
+# otherwise fire from its own checkout, at a different commit, fighting this one
+# for the GPIO pins. The whole crontab is backed up first.
+CRON_LINE="@reboot $RUNNER >> $CFG_LOG 2>&1"
+CRON_OLD="$(crontab -l -u "$SVC_USER" 2>/dev/null || true)"
+
+if [ -n "$CRON_OLD" ]; then
+  backup_dir="$PREFIX/backups"
+  install -d -m 755 "$backup_dir"
+  backup_file="$backup_dir/crontab.$SVC_USER.$(date +%Y%m%d%H%M%S)"
+  printf '%s\n' "$CRON_OLD" > "$backup_file"
+  chmod 600 "$backup_file"
+  ok "backed up the existing crontab to $backup_file"
+fi
+
+CRON_NEW=""
+in_block=0
+disabled=0
+while IFS= read -r line; do
+  # Drop our own previous block wholesale — it is regenerated below.
+  case "$line" in
+    "$CRON_BEGIN_PREFIX"*) in_block=1; continue ;;
+  esac
+  if [ "$in_block" -eq 1 ]; then
+    [ "$line" = "$CRON_END" ] && in_block=0
+    continue
+  fi
+  # Any other live line that launches minion: comment out, keep for reference.
+  if printf '%s' "$line" | grep -qE '^[[:space:]]*[^#].*(minion\.py|minion-run)'; then
+    warn "disabling a competing crontab entry (kept, commented out):"
+    printf '       %s\n' "$line" >&2
+    CRON_NEW="$CRON_NEW# disabled by minion quickstart.sh: $line"$'\n'
+    disabled=1
+    continue
+  fi
+  CRON_NEW="$CRON_NEW$line"$'\n'
+done <<< "$CRON_OLD"
+
+# Strip the blank line an empty crontab leaves behind, then append our block.
+[ "$CRON_NEW" = $'\n' ] && CRON_NEW=""
+CRON_NEW="$CRON_NEW$CRON_BEGIN"$'\n'
+CRON_NEW="$CRON_NEW# One refresh of the e-paper panel per boot. The PiSugar RTC is the real"$'\n'
+CRON_NEW="$CRON_NEW# scheduler: minion.py sets the next wake-up alarm and powers the Pi off."$'\n'
+CRON_NEW="$CRON_NEW# Deployed source: $SRC_DIR"$'\n'
+CRON_NEW="$CRON_NEW$CRON_LINE"$'\n'
+CRON_NEW="$CRON_NEW$CRON_END"$'\n'
+
+printf '%s' "$CRON_NEW" | crontab -u "$SVC_USER" - \
+  || die "could not install the crontab entry for '$SVC_USER'."
+ok "@reboot entry installed for '$SVC_USER'"
+[ "$disabled" -eq 1 ] && warn "  the disabled line(s) above are commented out in the crontab — delete them when you are happy."
+
+# cron only honours @reboot if the daemon is actually enabled at boot.
+if command -v systemctl >/dev/null 2>&1; then
+  cron_unit=""
+  for candidate in cron.service crond.service cronie.service; do
+    systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$candidate" && { cron_unit="$candidate"; break; }
+  done
+  if [ -n "$cron_unit" ]; then
+    systemctl enable "$cron_unit" >/dev/null 2>&1 || true
+    systemctl start "$cron_unit" >/dev/null 2>&1 || true
+    if systemctl is-enabled "$cron_unit" >/dev/null 2>&1; then
+      ok "$cron_unit is enabled at boot"
+    else
+      warn "$cron_unit is not enabled — @reboot will never fire. Enable it: systemctl enable --now $cron_unit"
+    fi
+  else
+    warn "no cron unit found — make sure the cron daemon starts at boot, or @reboot never fires."
   fi
 fi
 
-# The checkout that crontab entry used is now superseded. Say so plainly —
+# The checkout the old hand-rolled entry used is now superseded. Say so plainly —
 # otherwise it sits there looking authoritative while nothing runs it.
 if [ "$ADOPTED" -eq 0 ] && [ "$SVC_HOME/minion" != "$SRC_DIR" ] && is_minion_tree "$SVC_HOME/minion"; then
-  warn "$SVC_HOME/minion is no longer used — the unit deploys $SRC_DIR, which this script keeps"
-  warn "  up to date. Keep it for local work, delete it, or pass MINION_SRC_DIR=$SVC_HOME/minion"
+  warn "$SVC_HOME/minion is no longer used — the @reboot entry runs $SRC_DIR, which this script"
+  warn "  keeps up to date. Keep it for local work, delete it, or pass MINION_SRC_DIR=$SVC_HOME/minion"
   warn "  to deploy it instead."
 fi
 
@@ -633,27 +730,52 @@ fi
 # ---------------------------------------------------------------------------
 step "[8/8] Preflight checks"
 
-# Can the unit resolve the vendored driver? Read the values back out of the UNIT
-# FILE rather than from this script's variables — the artifact on disk is what
-# boots, so that is what should be tested.
+# Is the @reboot entry actually there, and does it call the runner we just
+# wrote? Read it back out of the installed crontab — the artifact on disk is
+# what boots, so that is what should be tested.
+installed_cron="$(crontab -l -u "$SVC_USER" 2>/dev/null | grep -E "^@reboot .*$RUNNER" || true)"
+if [ -n "$installed_cron" ]; then
+  ok "@reboot entry present in '$SVC_USER' crontab"
+  printf '       %s\n' "$installed_cron"
+else
+  warn "no @reboot entry calling $RUNNER in '$SVC_USER' crontab — nothing will run at boot."
+fi
+
+# Can the runner resolve the vendored driver? Same idea: parse the values out of
+# the generated script rather than reusing this script's variables.
 #
 # `python <script>` sets sys.path[0] to the SCRIPT's directory (examples/), not
-# the working directory, so a unit with WorkingDirectory but no PYTHONPATH dies
-# with "No module named 'lib'". Assigning sys.path[0] here reproduces that
-# exactly without needing to write a probe file into the checkout.
-unit_exec="$(sed -n 's/^ExecStart=//p' "$UNIT_PATH")"
-unit_py="${unit_exec%% *}"; unit_script="${unit_exec#* }"
-unit_wd="$(sed -n 's/^WorkingDirectory=//p' "$UNIT_PATH")"
-unit_pp="$(sed -n 's/^Environment=PYTHONPATH=//p' "$UNIT_PATH")"
-if ( cd "$unit_wd" && as_svc env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$unit_pp" "$unit_py" -c \
+# the working directory, so a launcher that only cd's dies with "No module named
+# 'lib'". Assigning sys.path[0] here reproduces that exactly without needing to
+# write a probe file into the checkout. env -i is the point of the test: cron
+# hands the job a bare environment, so nothing may depend on the caller's.
+run_exec="$(sed -n 's/^exec //p' "$RUNNER")"
+run_py="${run_exec%% *}"; run_script="${run_exec#* }"
+run_pp="$(sed -n 's/^export PYTHONPATH=//p' "$RUNNER")"
+run_wd="$(sed -n 's/^cd "\(.*\)" || exit 1$/\1/p' "$RUNNER")"
+if ( cd "$run_wd" && as_svc env -i HOME="$SVC_HOME" PATH=/usr/bin:/bin \
+     PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$run_pp" "$run_py" -c \
      'import sys, os, importlib.util as u
 sys.path[0] = os.path.dirname(os.path.abspath(sys.argv[1]))
 sys.exit(0 if u.find_spec("lib.waveshare_epd.epd2in13_V4") else 1)' \
-     "$unit_script" >/dev/null 2>&1 ); then
-  ok "the unit resolves lib.waveshare_epd (PYTHONPATH=$unit_pp)"
+     "$run_script" >/dev/null 2>&1 ); then
+  ok "the boot runner resolves lib.waveshare_epd in a bare cron environment (PYTHONPATH=$run_pp)"
 else
-  warn "the unit CANNOT import lib.waveshare_epd — it will die with \"No module named 'lib'\"."
-  warn "  the repo root must be on PYTHONPATH; WorkingDirectory alone is not enough."
+  warn "the boot runner CANNOT import lib.waveshare_epd — it will die with \"No module named 'lib'\"."
+  warn "  the repo root must be on PYTHONPATH; cd'ing into it is not enough."
+fi
+
+# The config is read by the runner's KEY=value parser, not by a shell. A
+# hand-edited file that picked up `export ` or `$(…)` still looks fine but
+# silently leaves the run on minion.py's built-in defaults — which point at the
+# original device. Cheap to check, so check.
+bad_cfg="$(grep -nE '^[[:space:]]*(export[[:space:]]|[A-Za-z_][A-Za-z0-9_]*=.*[`$])' "$CONFIG_FILE" 2>/dev/null || true)"
+if [ -n "$bad_cfg" ]; then
+  warn "$CONFIG_FILE has line(s) the boot runner will not apply (plain KEY=value only —"
+  warn "  no 'export', no shell expansion):"
+  printf '%s\n' "$bad_cfg" | sed 's/^/       /' >&2
+else
+  ok "$CONFIG_FILE is plain KEY=value (readable by the boot runner)"
 fi
 
 # Font — Pillow must be able to load it, or the app dies at import time.
@@ -724,7 +846,9 @@ fi
 if [ "$MINION_RUN_NOW" = 1 ]; then
   step "Running one refresh now (MINION_RUN_NOW=1)"
   warn "this schedules an RTC alarm and MAY SHUT THIS MACHINE DOWN (if minion-auto-shutdown is truthy)."
-  systemctl start "${SERVICE_NAME}.service" || warn "the run failed — see: journalctl -u ${SERVICE_NAME} -n 50"
+  # Exactly what cron will run at the next boot, in the same bare environment.
+  as_svc env -i HOME="$SVC_HOME" PATH=/usr/bin:/bin "$RUNNER" \
+    || warn "the run failed — see: tail -n 50 $CFG_LOG"
   ok "run finished (log: $CFG_LOG)"
 fi
 
@@ -743,19 +867,20 @@ ${C_GREEN}Minion $verb.${C_OFF} ${WARNINGS} warning(s) above.
   Source:   $SRC_DIR
   Config:   $CONFIG_FILE
   Log:      $CFG_LOG
-  Service:  ${SERVICE_NAME}.service — Type=oneshot, runs once at every boot
+  Boot:     @reboot in '$SVC_USER' crontab -> $RUNNER (one refresh per boot)
   Upgrade:  re-run this script; your config is preserved and a bad commit rolls back.
 $reboot_note
   Nothing has been run yet. Minion refreshes the panel on the NEXT boot, and the
   PiSugar RTC is what powers the Pi back on. To paint it now — knowing this sets
   an RTC alarm and may power the machine off:
 
-    sudo systemctl start ${SERVICE_NAME}     # or re-run with MINION_RUN_NOW=1
+    sudo -u $SVC_USER $RUNNER     # or re-run with MINION_RUN_NOW=1
 
   Inspect a run:
-    journalctl -u ${SERVICE_NAME} -n 50
     tail -f $CFG_LOG
+    crontab -l -u $SVC_USER          # the boot entry, between its BEGIN/END markers
 ${C_DIM}
-  Not the device you meant to set up? \`sudo systemctl disable ${SERVICE_NAME}\` — otherwise
-  this machine will run Minion at every boot and power itself off afterwards.${C_OFF}
+  Not the device you meant to set up? \`sudo crontab -u $SVC_USER -e\` and delete the
+  block between the minion markers — otherwise this machine will run Minion at
+  every boot and power itself off afterwards.${C_OFF}
 DONE

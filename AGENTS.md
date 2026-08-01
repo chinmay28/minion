@@ -13,8 +13,9 @@ and shuts the Pi down.
 
 The only other first-party file is
 [`scripts/quickstart.sh`](scripts/quickstart.sh), the one-command installer
-(`curl … | sudo bash`). It provisions deps, SPI, `/etc/minion.env`, and a
-`Type=oneshot` `minion.service`.
+(`curl … | sudo bash`). It provisions deps, SPI, `/etc/minion.env`, a generated
+runner at `/opt/minion/bin/minion-run`, and the `@reboot` crontab entry that
+calls it.
 
 `lib/waveshare_epd/` is a **vendored, trimmed copy** of Waveshare's driver
 library. Only two modules are kept — `epd2in13_V4.py` (the panel driver) and
@@ -59,9 +60,9 @@ There is **no test suite** and the hardware can't be exercised in CI:
   CWD is *not* sufficient: `python examples/minion.py` sets `sys.path[0]` to
   `examples/`, not the working directory, so the import fails with
   `ModuleNotFoundError: No module named 'lib'`. Any launcher — cron line,
-  systemd unit, shell wrapper — has to export `PYTHONPATH=<repo root>`. This has
+  shell wrapper, unit file — has to export `PYTHONPATH=<repo root>`. This has
   bitten this project once already; `scripts/quickstart.sh` now verifies it
-  against the generated unit file.
+  against the generated runner, in a bare `env -i` environment like cron's.
 - **Pillow ≥ 10.** Use `ImageDraw.textlength()` for text width;
   `textsize()` was removed in Pillow 10 and must not be reintroduced.
 - **Auto-shutdown is intentionally fail-safe.** If the home API is unreachable,
@@ -78,12 +79,21 @@ There is **no test suite** and the hardware can't be exercised in CI:
 - **The installer must never run `minion.py`** as a self-check (a run sets an
   RTC alarm and can power the machine off). Its verification is a compile +
   import check as the service user; hardware-side gaps warn, they don't fail.
-- **`minion.service` starts earlier in boot than the `@reboot` crontab it
-  replaced**, early enough to beat the PiSugar server to its socket — which
+- **The boot hook is cron's `@reboot`, not systemd.** A systemd unit starts far
+  earlier in boot — early enough to beat the PiSugar server to its socket, which
   reads as a cosmetic `N/A` battery but also silently drops the RTC wake-up
-  alarm. `After=` does not fix this (no-op against a wrongly-named unit; for
-  `Type=simple` it only means the process forked). The `ExecStartPre` readiness
-  gate is the guarantee — keep it, and keep it exiting 0.
+  alarm, so the Pi never comes back. cron starting late is the feature. Don't
+  reintroduce a unit; `quickstart.sh` actively removes any it finds, so exactly
+  one scheduler owns the boot. The `wait-for-pisugar` gate stays regardless, as
+  insurance — keep it exiting 0 so a missing PiSugar degrades instead of
+  blocking the run.
+- **cron gives a job nothing.** No `EnvironmentFile`, a bare `PATH` (no
+  `/sbin`, which `minion.py` needs for `shutdown`), and `$HOME` as the working
+  directory. Everything the run needs is set up in the generated
+  `/opt/minion/bin/minion-run`, not in the crontab line — keep that line a single
+  command. The runner *parses* `/etc/minion.env` as `KEY=value` rather than
+  sourcing it, so a stray line cannot execute anything; a new variable must be
+  plain `KEY=value` to reach the device.
 - **Ticker symbols** are `SYM_*` constants. They are the home API's keys; the
   on-screen label and the key are usually the same string but need not be —
   e.g. the quote fetched under key `P` is displayed as `PSTG`.

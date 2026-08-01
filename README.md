@@ -19,9 +19,9 @@ On a Raspberry Pi with the HAT seated:
 curl -fsSL https://raw.githubusercontent.com/chinmay28/minion/master/scripts/quickstart.sh | sudo bash
 ```
 
-That installs the dependencies, enables SPI, writes `/etc/minion.env`, and
-installs `minion.service` — a `Type=oneshot` unit that runs one refresh at every
-boot. Point it at your own server on the first install:
+That installs the dependencies, enables SPI, writes `/etc/minion.env`, and adds
+an `@reboot` crontab entry that runs one refresh at every boot. Point it at your
+own server on the first install:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/chinmay28/minion/master/scripts/quickstart.sh \
@@ -118,7 +118,7 @@ examples/minion.py        The application (the only first-party code)
 lib/waveshare_epd/        Trimmed Waveshare driver library
   epd2in13_V4.py            Panel driver for the 2.13" V4
   epdconfig.py              GPIO/SPI abstraction (Raspberry Pi path)
-scripts/quickstart.sh     One-command installer (deps, SPI, config, boot unit)
+scripts/quickstart.sh     One-command installer (deps, SPI, config, @reboot entry)
 requirements.txt          Runtime Python dependencies
 README.md                 This file
 AGENTS.md                 Notes for AI coding agents
@@ -169,10 +169,10 @@ answering and warns if it is not.
 |----------|---------|---------|
 | `MINION_REPO` | `https://github.com/chinmay28/minion.git` | Source to clone |
 | `MINION_REF` | `master` | Branch, tag, or commit to deploy |
-| `MINION_USER` | the invoking `sudo` user, else `minion` | User the service runs as |
+| `MINION_USER` | the invoking `sudo` user, else `minion` | User whose crontab gets the `@reboot` entry, and who the run happens as |
 | `MINION_SRC_DIR` | unset | Deploy a checkout *you* maintain instead of the managed clone |
 | `MINION_PREFIX` | `/opt/minion` | Install prefix (source → `$PREFIX/src`, venv → `$PREFIX/venv`) |
-| `MINION_CONFIG` | `/etc/minion.env` | Env file the unit reads |
+| `MINION_CONFIG` | `/etc/minion.env` | Env file the boot run loads |
 | `MINION_API_BASE_URL` | the original device's tailnet URL | Seeded into the config on **first install only** |
 | `MINION_LOG_FILE` | `<service user's home>/minion.log` | Seeded into the config on first install only |
 | `ENABLE_SPI` | `auto` | `never` to leave the SPI interface alone |
@@ -187,27 +187,38 @@ Notes on how it behaves:
   directory is whatever state it was left in, which is why it isn't used by
   default — set `MINION_SRC_DIR` to deploy one deliberately. Such a tree is
   yours: only fast-forwarded, never when dirty, never reset, never chowned.
-- **A leftover `@reboot` crontab entry is detected and reported.** If you set
-  this device up by hand, that line still fires at boot alongside the unit — and
-  from its *own* checkout, so the two would be running different commits. The
-  installer tells you and prints the command; removing it is your call.
+- **The boot hook is cron's `@reboot`, and the installer owns that entry.** It is
+  written between `# BEGIN minion` / `# END minion` markers and rewritten on
+  every run, so upgrading never stacks duplicates. Any *other* line that launches
+  minion — the hand-rolled `@reboot cd ~/minion && …` a by-hand setup leaves
+  behind — is commented out rather than deleted, since it would otherwise fire
+  from its own checkout, at a different commit, fighting the managed one for the
+  GPIO pins. The previous crontab is backed up to `/opt/minion/backups/` first.
+- **Any `minion.service` from an earlier install is removed**, not just disabled:
+  unit file, `multi-user.target.wants` symlink, and drop-in directory, followed
+  by a `daemon-reload`. Exactly one scheduler owns the boot.
 - **A now-unused `~/minion` checkout is called out** so it doesn't sit there
   looking authoritative while nothing runs it.
-- **The unit waits for PiSugar before running.** systemd starts it much earlier
-  in boot than cron ever did, early enough to lose a race with the PiSugar
-  server. `After=` alone doesn't fix that — it's a no-op against a unit whose
-  name doesn't match, and for a `Type=simple` service it only means the process
-  forked, not that it's listening. So the installer also writes
-  `/opt/minion/bin/wait-for-pisugar` and runs it as `ExecStartPre`: it polls the
-  PiSugar port for up to `MINION_PISUGAR_WAIT` seconds, releases the moment it
-  answers, and always exits 0 so a missing PiSugar degrades instead of blocking
-  boot.
+- **The boot run waits for PiSugar before starting.** cron fires late enough in
+  boot that this is usually insurance, but the failure it guards against is
+  expensive: if the PiSugar server isn't listening yet, the battery reads `N/A`
+  and — much worse — the RTC wake-up alarm is never set, so the Pi doesn't come
+  back. `/opt/minion/bin/wait-for-pisugar` polls the port for up to
+  `MINION_PISUGAR_WAIT` seconds, releases the moment it answers, and always exits
+  0 so a missing PiSugar degrades instead of blocking the run.
+- **cron hands a job almost nothing** — no `EnvironmentFile`, a bare `PATH`, no
+  working directory — so the crontab line calls
+  `/opt/minion/bin/minion-run`, a generated script that sets `PATH`, loads
+  `/etc/minion.env`, waits for PiSugar, exports `PYTHONPATH`, and execs
+  `minion.py`. The config is *parsed* (plain `KEY=value`), never sourced, so a
+  stray line in it cannot execute anything.
 - **The config file is written once and never rewritten.** It is the only state
   Minion has, and it is what makes one device differ from another; clobbering it
   on upgrade would silently repoint your Pi at somebody else's API.
 - **The service user defaults to whoever ran `sudo`**, matching the original
-  deployment (log in that user's home, already in the `spi`/`gpio` groups). Piped
-  into a bare root shell it falls back to a dedicated `minion` system account.
+  deployment (its crontab, log in that user's home, already in the `spi`/`gpio`
+  groups). Piped into a bare root shell it falls back to a dedicated `minion`
+  system account.
 - **Off a Raspberry Pi it still installs**, skipping the SPI and PiSugar steps
   and warning about them, so it is usable for staging on a plain Debian box.
 - **Hardware-side gaps warn rather than fail.** A missing panel, PiSugar, or
@@ -218,7 +229,7 @@ Notes on how it behaves:
 
 All deployment-specific values are environment variables with defaults baked in
 for the original device. Override them to run elsewhere — quickstart writes them
-into `/etc/minion.env`, which `minion.service` loads as an `EnvironmentFile`:
+into `/etc/minion.env`, which the boot runner loads before starting `minion.py`:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -227,7 +238,7 @@ into `/etc/minion.env`, which `minion.service` loads as an `EnvironmentFile`:
 | `MINION_API_BASE_URL` | `http://nakedpi.stingray-boga.ts.net:9999/api/entries` | Home API base URL |
 | `MINION_PISUGAR_HOST` | `127.0.0.1` | PiSugar server host |
 | `MINION_PISUGAR_PORT` | `8423` | PiSugar server port |
-| `MINION_PISUGAR_WAIT` | `30` | Seconds the boot service waits for PiSugar to start listening (`0` disables). Read by the unit's readiness gate, not by `minion.py`. |
+| `MINION_PISUGAR_WAIT` | `30` | Seconds the boot run waits for PiSugar to start listening (`0` disables). Read by the readiness gate, not by `minion.py`. |
 
 The quote ticker symbols are defined as `SYM_*` constants near the top of
 `minion.py`. Note the renderer's two-column layout is fixed to the current set
@@ -290,29 +301,39 @@ the other two are nested under `data`.
 ## Running
 
 The script is designed to run **once at boot** and then shut the Pi down,
-relying on the PiSugar RTC to power it back on. Quickstart wires that up as a
-`Type=oneshot` systemd unit with no `Restart=` — a failed run must not retry in a
-loop, because the panel keeps its last image and retrying would only burn
-battery:
+relying on the PiSugar RTC to power it back on. Quickstart wires that up as an
+`@reboot` crontab entry — one run per boot, no retry, because the panel keeps its
+last image and retrying a failed run would only burn battery:
 
-```bash
-systemctl status minion          # result of the last boot's run
-systemctl start minion           # force a refresh now (may power the Pi off)
-journalctl -u minion -n 50
-systemctl disable minion         # stop running it at boot
+```cron
+# BEGIN minion - managed by quickstart.sh, rewritten on every run
+@reboot /opt/minion/bin/minion-run >> /home/pi/minion.log 2>&1
+# END minion
 ```
 
-By hand, any boot hook works — a unit of your own or cron `@reboot`. Note the
-`PYTHONPATH` export; without it the driver import fails (see
-[Repository layout](#repository-layout)):
+```bash
+crontab -l -u pi                 # the boot entry, between its markers
+sudo -u pi /opt/minion/bin/minion-run    # force a refresh now (may power the Pi off)
+tail -n 50 /home/pi/minion.log   # result of the last boot's run
+sudo crontab -u pi -e            # delete the marked block to stop running at boot
+```
+
+`minion-run` is generated by the installer: cron gives a job a bare environment,
+so the script sets `PATH`, loads `/etc/minion.env`, waits for PiSugar, exports
+`PYTHONPATH`, and execs `minion.py`.
+
+By hand, any boot hook works. Note the `PYTHONPATH` export; without it the driver
+import fails (see [Repository layout](#repository-layout)):
 
 ```cron
 @reboot cd ~/minion/ && export PYTHONPATH=$(pwd) && python examples/minion.py
 ```
 
-If you switch to the systemd unit, **remove the crontab line.** Otherwise both
-fire at boot, racing for the same GPIO pins — and from different checkouts, since
-quickstart deploys `/opt/minion/src` while that line runs `~/minion`.
+Whatever you use, make sure **only one** boot hook is live. Two of them race for
+the same GPIO pins — and typically from different checkouts, since quickstart
+deploys `/opt/minion/src` while a hand-written line runs `~/minion`. Quickstart
+enforces that itself: it comments out any competing crontab line and removes the
+`minion.service` unit older versions of it used to install.
 
 > **Heads up:** running `minion.py` will (by default) schedule an RTC alarm and
 > attempt to shut the machine down. Don't run it casually on a Pi you want to
@@ -337,10 +358,14 @@ when debugging a run.
   `MINION_PISUGAR_HOST:PORT`, or `nc` (netcat) isn't installed. Note the RTC
   alarm goes through the *same* socket, so an `N/A` battery usually means the
   wake-up alarm was not set either — check `RTC response:` in the log, and treat
-  that as the real problem. If this started after switching from an `@reboot`
-  crontab to `minion.service`, it is a boot race: the unit starts far earlier
-  than cron did. Re-run `quickstart.sh` to install the readiness gate, or raise
-  `MINION_PISUGAR_WAIT`. `journalctl -u minion -b` shows the gate giving up.
+  that as the real problem. If it only happens on the boot run and not by hand,
+  it is a boot race with the PiSugar server: re-run `quickstart.sh` to install
+  the readiness gate, or raise `MINION_PISUGAR_WAIT`. The gate prints to the log
+  when it gives up.
+- **Nothing happens at boot** — check the entry is still there (`crontab -l -u
+  <user>`) and that cron itself starts at boot (`systemctl is-enabled cron`).
+  `@reboot` only fires if the cron daemon is enabled. Then run
+  `/opt/minion/bin/minion-run` by hand: it is exactly what cron runs.
 - **Display init fails** — verify SPI is enabled and the HAT is seated; the GPIO
   Python packages must be installed on the Pi.
 
