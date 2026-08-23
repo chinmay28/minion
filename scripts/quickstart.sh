@@ -313,7 +313,12 @@ else
   # breaks for a local-path origin the service user owns.)
   mkdir -p "$PREFIX"
   chown "$SVC_USER":"$SVC_GROUP" "$PREFIX" 2>/dev/null || true
-  as_svc git clone --branch "$MINION_REF" "$MINION_REPO" "$SRC_DIR" \
+  # NOT --depth 1: the version's patch number is the commit count, and a shallow
+  # clone would make every run log itself as 2026.8.1. --filter=blob:none keeps
+  # it cheap — the whole commit graph, but only the blobs the checkout needs.
+  # Fall back for git < 2.19, then for a ref that is not a branch.
+  as_svc git clone --filter=blob:none --branch "$MINION_REF" "$MINION_REPO" "$SRC_DIR" \
+    || as_svc git clone --branch "$MINION_REF" "$MINION_REPO" "$SRC_DIR" \
     || as_svc git clone "$MINION_REPO" "$SRC_DIR" \
     || die "clone failed — check connectivity to $MINION_REPO"
   ok "cloned to $SRC_DIR"
@@ -328,6 +333,20 @@ is_minion_tree "$SRC_DIR" || die "no examples/minion.py + lib/waveshare_epd at $
 # this is the failure that shows up as a mysterious ExecStart=203/EXEC.
 as_svc test -r "$SRC_DIR/examples/minion.py" \
   || warn "'$SVC_USER' cannot read $SRC_DIR/examples/minion.py — check the permissions on $SRC_DIR."
+
+# The version is vYEAR.MONTH.<commit count> (scripts/version.sh). Count once,
+# here, and bake the number into the runner below: the boot run happens from
+# cron with a bare PATH on a battery device, so it must not shell out to git for
+# a number that cannot change between reboots. A tree with no .git — or a
+# shallow one, which version.sh refuses to guess around — leaves it at 0, and a
+# run logging v2026.8.0 says so rather than claiming a release it isn't.
+VERSION_PATCH="$(as_svc "$SRC_DIR/scripts/version.sh" --patch 2>/dev/null || echo 0)"
+MINION_VERSION="$(as_svc "$SRC_DIR/scripts/version.sh" 2>/dev/null || echo "v?.?.0")"
+if [ "$VERSION_PATCH" = 0 ]; then
+  warn "could not count this checkout's commits — runs will log $MINION_VERSION."
+else
+  ok "version $MINION_VERSION"
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Python environment (+ the check that gates a rollback)
@@ -609,6 +628,10 @@ fi
 
 cd "$SRC_DIR" || exit 1
 export PYTHONPATH=$SRC_DIR
+# The build this runner was generated for. minion.py cannot count commits at
+# boot (see scripts/version.sh), so the installer passes the number it counted.
+# Re-running the installer after an update rewrites this line.
+export MINION_VERSION_PATCH=$VERSION_PATCH
 exec $VENV_PY $SRC_DIR/examples/minion.py
 RUNNER_EOF
 chmod 755 "$RUNNER"
@@ -864,6 +887,7 @@ cat <<DONE
 
 ${C_GREEN}Minion $verb.${C_OFF} ${WARNINGS} warning(s) above.
 
+  Version:  $MINION_VERSION
   Source:   $SRC_DIR
   Config:   $CONFIG_FILE
   Log:      $CFG_LOG
