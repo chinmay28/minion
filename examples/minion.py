@@ -9,6 +9,28 @@ from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 from lib.waveshare_epd import epd2in13_V4
 
+# --- Version ---
+# vYEAR.MONTH.PATCH, a calendar version: YEAR and MONTH name the release line
+# and PATCH is the repository's commit count, so every commit is a patch
+# release and v2026.8.42 is the 42nd commit on the 2026.8 line. The same scheme
+# the rest of the family uses.
+#
+# YEAR/MONTH are declared here and nowhere else — scripts/version.sh reads them
+# back out with an anchored regex, so keep them one-per-line in `NAME = digits`
+# form. Bump them by hand when a release line opens; they are deliberately not
+# read from the clock, which would move the version without a commit.
+#
+# The patch can only come from git, and this runs from cron on a battery device
+# with a bare PATH — shelling out to git on every boot to count commits would be
+# both slow and fragile. The installer counts once and passes the number in as
+# MINION_VERSION_PATCH (see scripts/quickstart.sh); an unset one reads back as
+# "0", which marks a run whose build could not be identified rather than
+# claiming to be release 1.
+YEAR = 2026
+MONTH = 8
+PATCH = os.environ.get("MINION_VERSION_PATCH", "").strip() or "0"
+VERSION = f"v{YEAR}.{MONTH}.{PATCH}"
+
 # --- Configuration (override via environment) ---
 LOG_FILE = os.environ.get("MINION_LOG_FILE", "/home/chinmay/minion.log")
 FONT_PATH = os.environ.get("MINION_FONT_PATH", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
@@ -186,6 +208,10 @@ def main():
     logger.info("---------------------------------------------")
     logger.info("------------------MiNiON---------------------")
     logger.info("---------------------------------------------")
+    # The log is the only window onto an unattended device, so every run says
+    # which build it is. A ".0" here means the installer could not count the
+    # commits — usually a shallow checkout.
+    logger.info(f"Minion {VERSION}")
 
     logger.info("Making REST calls to Home API...")
     quotes = get_quotes()

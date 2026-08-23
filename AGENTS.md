@@ -11,11 +11,12 @@ driven by a Raspberry Pi Zero 2 W. **The application is one file,
 home API, renders them to a 2.13" panel, schedules an RTC wake-up via PiSugar,
 and shuts the Pi down.
 
-The only other first-party file is
+The other first-party files are
 [`scripts/quickstart.sh`](scripts/quickstart.sh), the one-command installer
-(`curl … | sudo bash`). It provisions deps, SPI, `/etc/minion.env`, a generated
+(`curl … | sudo bash`) — it provisions deps, SPI, `/etc/minion.env`, a generated
 runner at `/opt/minion/bin/minion-run`, and the `@reboot` crontab entry that
-calls it.
+calls it — and [`scripts/version.sh`](scripts/version.sh), which assembles the
+version number (see **Versioning** below).
 
 `lib/waveshare_epd/` is a **vendored, trimmed copy** of Waveshare's driver
 library. Only two modules are kept — `epd2in13_V4.py` (the panel driver) and
@@ -37,6 +38,30 @@ explicitly asked; treat `lib/` as third-party code and avoid reformatting or
   output, broad `try/except` around every external interaction (HTTP, PiSugar
   socket, display I/O) that degrades to `"N/A"` or a skipped step rather than
   crashing. The device runs unattended, so resilience beats strictness.
+
+## Versioning
+
+`vYEAR.MONTH.PATCH`, the calendar scheme the rest of the family uses: the patch
+is the repository's commit count, so every commit is a patch release.
+
+- `YEAR`/`MONTH` are declared at the top of `minion.py` and **nowhere else**.
+  `scripts/version.sh` reads them back with an anchored regex, so keep them
+  one-per-line in `NAME = digits` form, and keep the month unpadded (a leading
+  zero is not valid semver). Bump them by hand when a release line opens —
+  never from the clock, which would move the version without a commit.
+- The patch cannot be computed on the device: the boot run is a cron job with a
+  bare PATH on a battery, and shelling out to git every boot for a number that
+  cannot change between reboots is both slow and fragile. `quickstart.sh` runs
+  `version.sh --patch` once at install time and exports the result into the
+  generated runner as `MINION_VERSION_PATCH`; `minion.py` reads it back with a
+  default of `"0"`.
+- **Do not make `minion.py` shell out to git**, and do not have `version.sh`
+  import `minion.py` — it imports PIL, requests and the Waveshare driver at
+  module level, none of which load off a Pi, so the script parses the constants
+  instead.
+- Patch `0` is the "could not identify this build" marker: no `.git`, or a
+  shallow clone, which `version.sh` refuses to guess around. That is why the
+  installer clones with `--filter=blob:none` rather than `--depth 1`.
 
 ## Validation
 

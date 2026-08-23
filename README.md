@@ -119,6 +119,7 @@ lib/waveshare_epd/        Trimmed Waveshare driver library
   epd2in13_V4.py            Panel driver for the 2.13" V4
   epdconfig.py              GPIO/SPI abstraction (Raspberry Pi path)
 scripts/quickstart.sh     One-command installer (deps, SPI, config, @reboot entry)
+scripts/version.sh        Assembles vYEAR.MONTH.<commit count> — the version, in one place
 requirements.txt          Runtime Python dependencies
 README.md                 This file
 AGENTS.md                 Notes for AI coding agents
@@ -340,12 +341,49 @@ enforces that itself: it comments out any competing crontab line and removes the
 > stay on — clear the server's auto-shutdown flag first, or run it somewhere
 > without PiSugar/`sudo shutdown`.
 
+## Versioning
+
+`vYEAR.MONTH.PATCH` — a calendar version, where **the patch number is the
+repository's commit count**, so `v2026.8.42` is the 42nd commit on the 2026.8
+line. It is the same scheme
+[sand-vault](https://github.com/chinmay28/sand-vault) and
+[HomeAPI](https://github.com/chinmay28/HomeAPI) use.
+
+There is no semantic major/minor: the leading numbers say *when* a release line
+opened, not what they promise about compatibility.
+
+- `YEAR`/`MONTH` are declared at the top of
+  [`examples/minion.py`](examples/minion.py) and nowhere else, bumped by hand
+  when a release line opens. The month is not zero-padded (`v2026.8.42`, not
+  `v2026.08.42`), which keeps the string valid semver.
+- `PATCH` can only come from git, and the boot run happens from cron with a bare
+  PATH on a battery device — so `minion.py` does not count for itself. The
+  installer runs [`scripts/version.sh`](scripts/version.sh) once and bakes the
+  number into the generated runner as `MINION_VERSION_PATCH`.
+
+```bash
+scripts/version.sh            # v2026.8.42
+scripts/version.sh --patch    # 42
+```
+
+Every run logs its version as its first line, so the log identifies the build
+that wrote it. A patch of `0` means the installer could not count the commits —
+no `.git`, or a **shallow clone**, which `version.sh` detects and refuses to
+guess around rather than logging a run that calls itself `v2026.8.1`. The
+installer clones with `--filter=blob:none` for exactly this reason: cheap, but
+with the whole commit graph.
+
+Because the number is baked in at install time, **the version only moves when
+the installer is re-run** — which is also when the code moves, so the two stay
+honest together.
+
 ## Logging
 
 Everything is logged at `DEBUG` level to `MINION_LOG_FILE`
-(`/home/chinmay/minion.log` by default), including raw API responses, the
-battery reading, the chosen wake time, and the RTC server's reply. Start here
-when debugging a run.
+(`/home/chinmay/minion.log` by default). The first line of each run is the
+version it is running; after that come raw API responses, the battery reading,
+the chosen wake time, and the RTC server's reply. Start here when debugging a
+run.
 
 ## Troubleshooting
 
