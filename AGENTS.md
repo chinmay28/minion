@@ -26,6 +26,38 @@ images). **Do not re-add upstream drivers, examples, or `pic/` assets** unless
 explicitly asked; treat `lib/` as third-party code and avoid reformatting or
 "cleaning it up."
 
+## The Pico W build (`pico/`)
+
+[`pico/`](pico/) is a second target: MicroPython on a Raspberry Pi Pico W,
+powered through a TPL5110 timer from two AA lithium cells (see
+[`pico/README.md`](pico/README.md)). It shares the Home API contract with
+`minion.py` and nothing else: no code is shared, because one runs CPython with
+Pillow and the other runs MicroPython with `framebuf`.
+
+- **Pure modules are tested on the desktop**, and that is the validation:
+  ```bash
+  python3 -m unittest discover -s pico/tests -t pico
+  python3 -m py_compile pico/*.py
+  ```
+  `schedule.py`, `localtime.py`, `homeapi.py`, `layout.py`, `font.py`, and
+  the byte reordering in `epd2in13b_v4.py` have no hardware imports. Keep it
+  that way: a decision belongs in one of those, and `power.py` / `main.py`
+  only fetch, signal, and sequence.
+- **`layout.validate` is the display contract.** Any layout change must keep
+  it passing for the views in `tests/test_layout.py`, including the wide
+  values; it is what stops text running off the 250-pixel panel or red text
+  landing on a black bar, which the controller renders as black.
+- **The panel driver's register sequence and framebuffer geometry are
+  load-bearing.** They are Waveshare's; earlier attempts to change them gave
+  mirrored glyphs and all-red screens. Change the busy-wait or the byte
+  shipping, not the sequence.
+- **MicroPython, not CPython:** no `datetime`, `dataclasses`, `typing`,
+  `enum`, or the `,` format specifier; `%`-formatting and f-strings are fine.
+  Wi-Fi credentials live in the gitignored `pico/secrets.py`.
+- **Versioning** reuses `scripts/version.sh`: `pico/install.sh` writes the
+  result into a gitignored `version.py` on the board. `YEAR`/`MONTH` stay
+  declared in `minion.py` only.
+
 ## Working agreements
 
 - **Keep the surface small.** This is a hobby device, not a framework. Prefer

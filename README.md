@@ -113,6 +113,11 @@ repeats.
 
 ## Repository layout
 
+> **Pico W build.** [`pico/`](pico/) is a second target for the same dashboard:
+> a Raspberry Pi Pico W with a TPL5110 power timer and two AA lithium cells,
+> refreshing twice a day for years on a charge. It reads the same Home API
+> entries. See [`pico/README.md`](pico/README.md).
+
 ```
 examples/minion.py        The application (the only first-party code)
 lib/waveshare_epd/        Trimmed Waveshare driver library

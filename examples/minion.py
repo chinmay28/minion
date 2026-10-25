@@ -27,7 +27,7 @@ from lib.waveshare_epd import epd2in13_V4
 # "0", which marks a run whose build could not be identified rather than
 # claiming to be release 1.
 YEAR = 2026
-MONTH = 8
+MONTH = 10
 PATCH = os.environ.get("MINION_VERSION_PATCH", "").strip() or "0"
 VERSION = f"v{YEAR}.{MONTH}.{PATCH}"
 
